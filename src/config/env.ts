@@ -35,17 +35,31 @@ function bool(value: string | undefined, fallback = false): boolean {
 
 const nodeEnv = process.env.NODE_ENV || "development";
 
+/** The published SureGad web app (GitHub Pages). Always allowed to call this API. */
+const PUBLISHED_WEB_APP = "https://auxxbaysaranya-maker.github.io/suregad-frontend";
+
+const isLocal = (value?: string) => !value || /\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(value);
+/** Render sets RENDER_EXTERNAL_URL; prefer it over a value still pointing at localhost. */
+const hostUrl = process.env.RENDER_EXTERNAL_URL;
+
+const appUrl = !isLocal(process.env.APP_URL) ? process.env.APP_URL! : hostUrl ? PUBLISHED_WEB_APP : process.env.APP_URL || "http://localhost:5173";
+
+const clientOrigins = [
+  ...(process.env.CLIENT_ORIGIN || "http://localhost:5173").split(","),
+  new URL(PUBLISHED_WEB_APP).origin,
+  new URL(appUrl).origin,
+]
+  .map((origin) => origin.trim().replace(/\/+$/, ""))
+  .filter((origin, index, all) => origin && all.indexOf(origin) === index);
+
 export const env = {
   nodeEnv,
   isProduction: nodeEnv === "production",
   isTest: nodeEnv === "test",
   port: Number(process.env.PORT || 4000),
-  clientOrigins: (process.env.CLIENT_ORIGIN || "http://localhost:5173")
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean),
-  appUrl: process.env.APP_URL || "http://localhost:5173",
-  apiPublicUrl: process.env.API_PUBLIC_URL || "http://localhost:4000",
+  clientOrigins,
+  appUrl,
+  apiPublicUrl: !isLocal(process.env.API_PUBLIC_URL) ? process.env.API_PUBLIC_URL! : hostUrl || process.env.API_PUBLIC_URL || "http://localhost:4000",
   mongoUri: process.env.MONGODB_URI || "",
   redisUrl: process.env.REDIS_URL || "",
   adminBootstrapEmails: (process.env.ADMIN_BOOTSTRAP_EMAILS || "")
