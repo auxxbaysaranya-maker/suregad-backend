@@ -1,11 +1,6 @@
-import { createRequire } from "module";
+import webpush from "web-push";
 import { env } from "../config/env";
 import { logger } from "../config/logger";
-
-const webpush = createRequire(import.meta.url)("web-push") as {
-  setVapidDetails: (subject: string, publicKey: string, privateKey: string) => void;
-  sendNotification: (subscription: { endpoint: string; keys: { p256dh: string; auth: string } }, payload: string) => Promise<unknown>;
-};
 
 let configured = false;
 

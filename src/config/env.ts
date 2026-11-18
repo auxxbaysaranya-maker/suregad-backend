@@ -1,11 +1,31 @@
 import dotenv from "dotenv";
+import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 
-const serverRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+/**
+ * The folder holding package.json (and .env). Found by walking up from the running script and
+ * the working directory, so it works for `tsx src/server.ts`, the bundled `dist/server.cjs`, and tests.
+ * (import.meta is not available in the CommonJS bundle.)
+ */
+function findServerRoot(): string {
+  const starts = [process.argv[1] ? path.dirname(path.resolve(process.argv[1])) : "", process.cwd()].filter(Boolean);
+  for (const start of starts) {
+    let dir = start;
+    for (let depth = 0; depth < 6; depth += 1) {
+      if (fs.existsSync(path.join(dir, "package.json"))) return dir;
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+  return process.cwd();
+}
+
+const serverRoot = findServerRoot();
 
 if (process.env.NODE_ENV !== "test") {
-  dotenv.config({ path: path.join(serverRoot, ".env"), override: true });
+  // Real environment variables (e.g. set on Render) win over the .env file.
+  dotenv.config({ path: path.join(serverRoot, ".env"), override: false, quiet: true });
 }
 
 function bool(value: string | undefined, fallback = false): boolean {
