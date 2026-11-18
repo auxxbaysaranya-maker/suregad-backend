@@ -1,0 +1,116 @@
+import { Queue, Worker } from "bullmq";
+import IORedis from "ioredis";
+import { env } from "../config/env";
+import { logger } from "../config/logger";
+import { Notification } from "../models/engagement.model";
+import { User } from "../models/user.model";
+import { sendEmail, sendSms, sendWhatsApp } from "../integrations/channels";
+import { sendWebPush } from "../integrations/push";
+import { sendFirebasePush } from "../integrations/firebase";
+
+type NotifyInput = {
+  userId: string;
+  event: string;
+  title: string;
+  body: string;
+  data?: Record<string, unknown>;
+};
+
+type UserPrefs = { email: boolean; sms: boolean; whatsapp: boolean; push: boolean };
+
+type Delivery = NotifyInput & {
+  email?: string;
+  phone?: string;
+  prefs: UserPrefs;
+  pushSubscriptions?: { endpoint: string; keys?: { p256dh?: string; auth?: string } }[];
+  fcmTokens?: string[];
+};
+
+let queue: Queue | null = null;
+let workerStarted = false;
+
+function redis() {
+  if (!env.redisUrl) return null;
+  return new IORedis(env.redisUrl, { maxRetriesPerRequest: null });
+}
+
+export function startNotificationWorker(): void {
+  if (workerStarted) return;
+  workerStarted = true;
+  const connection = redis();
+  if (!connection) {
+    logger.warn("REDIS_URL is not set. Notification side-channels run in-process.");
+    return;
+  }
+  queue = new Queue("notifications", { connection });
+  new Worker(
+    "notifications",
+    async (job) => {
+      await deliverExternal(job.data as Delivery);
+    },
+    { connection },
+  );
+}
+
+async function deliverExternal(input: Delivery) {
+  if (input.prefs.email && input.email) {
+    await sendEmail({ to: input.email, subject: input.title, body: input.body });
+  }
+  if (input.prefs.sms && input.phone) await sendSms({ to: input.phone, body: input.body });
+  if (input.prefs.whatsapp && input.phone) await sendWhatsApp({ to: input.phone, body: input.body });
+  if (input.prefs.push && input.pushSubscriptions?.length) {
+    await sendWebPush(input.pushSubscriptions, { title: input.title, body: input.body, url: "/account" });
+  }
+  if (input.prefs.push && input.fcmTokens?.length) {
+    await sendFirebasePush(input.fcmTokens, { title: input.title, body: input.body, url: "/account" });
+  }
+}
+
+export async function notify(input: NotifyInput): Promise<void> {
+  const user = await User.findById(input.userId);
+  if (!user || user.status !== "active") return;
+  const prefs = user.notificationPreferences || {
+    inApp: true,
+    email: true,
+    sms: false,
+    whatsapp: false,
+    push: false,
+  };
+  if (prefs.inApp !== false) {
+    await Notification.create({
+      userId: user._id,
+      event: input.event,
+      title: input.title,
+      body: input.body,
+      data: input.data,
+      channels: ["in_app"],
+    });
+  }
+  const payload: Delivery = {
+    ...input,
+    email: user.email || undefined,
+    phone: user.phone || undefined,
+    prefs: {
+      email: Boolean(prefs.email),
+      sms: Boolean(prefs.sms),
+      whatsapp: Boolean(prefs.whatsapp),
+      push: Boolean(prefs.push),
+    },
+    pushSubscriptions: (user.pushSubscriptions || []).map((subscription) => ({
+      endpoint: subscription.endpoint,
+      keys: { p256dh: subscription.keys?.p256dh || undefined, auth: subscription.keys?.auth || undefined },
+    })),
+    fcmTokens: user.fcmTokens || [],
+  };
+  if (queue) {
+    await queue.add("deliver", payload);
+  } else {
+    setImmediate(() => {
+      deliverExternal(payload).catch((error) => logger.error({ err: error }, "Notification delivery failed"));
+    });
+  }
+}
+
+export async function notifyMany(userIds: string[], input: Omit<NotifyInput, "userId">): Promise<void> {
+  await Promise.all(userIds.map((userId) => notify({ ...input, userId })));
+}

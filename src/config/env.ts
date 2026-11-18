@@ -1,0 +1,130 @@
+import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const serverRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+if (process.env.NODE_ENV !== "test") {
+  dotenv.config({ path: path.join(serverRoot, ".env"), override: true });
+}
+
+function bool(value: string | undefined, fallback = false): boolean {
+  if (value === undefined || value === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+}
+
+const nodeEnv = process.env.NODE_ENV || "development";
+
+export const env = {
+  nodeEnv,
+  isProduction: nodeEnv === "production",
+  isTest: nodeEnv === "test",
+  port: Number(process.env.PORT || 4000),
+  clientOrigins: (process.env.CLIENT_ORIGIN || "http://localhost:5173")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+  appUrl: process.env.APP_URL || "http://localhost:5173",
+  apiPublicUrl: process.env.API_PUBLIC_URL || "http://localhost:4000",
+  mongoUri: process.env.MONGODB_URI || "",
+  redisUrl: process.env.REDIS_URL || "",
+  adminBootstrapEmails: (process.env.ADMIN_BOOTSTRAP_EMAILS || "")
+    .split(",")
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean),
+  dataEncryptionKey: process.env.DATA_ENCRYPTION_KEY || "",
+  allowDevAuth: !bool(String(nodeEnv === "production")) && bool(process.env.ALLOW_DEV_AUTH),
+  devAuthSecret: process.env.DEV_AUTH_SECRET || "",
+  firebase: {
+    projectId: process.env.FIREBASE_PROJECT_ID || "",
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL || "",
+    privateKey: process.env.FIREBASE_PRIVATE_KEY || "",
+    credentialsPath: process.env.GOOGLE_APPLICATION_CREDENTIALS || "",
+  },
+  cloudinary: {
+    cloudName: process.env.CLOUDINARY_CLOUD_NAME || "",
+    apiKey: process.env.CLOUDINARY_API_KEY || "",
+    apiSecret: process.env.CLOUDINARY_API_SECRET || "",
+  },
+  s3: {
+    endpoint: process.env.S3_ENDPOINT || "",
+    region: process.env.S3_REGION || "ap-south-1",
+    bucket: process.env.S3_BUCKET || "",
+    accessKeyId: process.env.S3_ACCESS_KEY_ID || "",
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY || "",
+    publicBaseUrl: process.env.S3_PUBLIC_BASE_URL || "",
+    forcePathStyle: bool(process.env.S3_FORCE_PATH_STYLE),
+  },
+  paymentProvider: process.env.PAYMENT_PROVIDER || "razorpay",
+  razorpay: {
+    keyId: process.env.RAZORPAY_KEY_ID || "",
+    keySecret: process.env.RAZORPAY_KEY_SECRET || "",
+    webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || "",
+  },
+  ai: {
+    provider: process.env.AI_PROVIDER || "openai",
+    apiKey: process.env.AI_API_KEY || "",
+    baseUrl: process.env.AI_BASE_URL || "https://api.openai.com/v1",
+    model: process.env.AI_MODEL || "gpt-4o-mini",
+    monthlyTokenBudget: Number(process.env.AI_MONTHLY_TOKEN_BUDGET || 200000),
+  },
+  smtp: {
+    host: process.env.SMTP_HOST || "",
+    port: Number(process.env.SMTP_PORT || 587),
+    user: process.env.SMTP_USER || "",
+    pass: process.env.SMTP_PASS || "",
+    from: process.env.SMTP_FROM || "SureGad <noreply@suregad.com>",
+  },
+  sms: {
+    provider: process.env.SMS_PROVIDER || "",
+    apiKey: process.env.SMS_API_KEY || "",
+    senderId: process.env.SMS_SENDER_ID || "SUREGD",
+  },
+  whatsapp: {
+    provider: process.env.WHATSAPP_PROVIDER || "",
+    apiKey: process.env.WHATSAPP_API_KEY || "",
+    phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
+  },
+  vapid: {
+    publicKey: process.env.VAPID_PUBLIC_KEY || "",
+    privateKey: process.env.VAPID_PRIVATE_KEY || "",
+    subject: process.env.VAPID_SUBJECT || "mailto:support@suregad.com",
+  },
+};
+
+export function integrationStatus() {
+  const firebaseConfigured = Boolean(
+    (env.firebase.projectId && env.firebase.clientEmail && env.firebase.privateKey) ||
+      env.firebase.credentialsPath,
+  );
+  const paymentsConfigured =
+    env.paymentProvider === "razorpay"
+      ? Boolean(env.razorpay.keyId && env.razorpay.keySecret && env.razorpay.webhookSecret)
+      : env.paymentProvider === "mock" && !env.isProduction;
+  return {
+    environment: env.nodeEnv,
+    database: Boolean(env.mongoUri),
+    redis: Boolean(env.redisUrl),
+    firebaseAdmin: firebaseConfigured,
+    devAuth: env.allowDevAuth && Boolean(env.devAuthSecret),
+    payments: paymentsConfigured
+      ? env.isProduction
+        ? "razorpay"
+        : env.paymentProvider
+      : "not_configured",
+    storage:
+      env.cloudinary.cloudName && env.cloudinary.apiKey && env.cloudinary.apiSecret
+        ? "cloudinary"
+        : env.s3.bucket && env.s3.accessKeyId
+          ? "s3"
+          : env.isProduction
+            ? "not_configured"
+            : "local",
+    webPush: Boolean(env.vapid.publicKey && env.vapid.privateKey),
+    ai: Boolean(env.ai.apiKey),
+    email: Boolean(env.smtp.host),
+    sms: Boolean(env.sms.provider && env.sms.apiKey),
+    whatsapp: Boolean(env.whatsapp.provider && env.whatsapp.apiKey),
+    encryption: Boolean(env.dataEncryptionKey && env.dataEncryptionKey.length >= 32),
+  };
+}

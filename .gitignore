@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+
+# Secrets and local settings. Commit .env.example only.
+.env
+.env.local
+.env.*.local
+firebase-service-account.json
+*service-account*.json
+
+# Files uploaded through the local storage driver in development.
+uploads/
