@@ -38,7 +38,7 @@ import {
   SupportTicket,
 } from "../models/engagement.model";
 import { PartnerPayout } from "../models/engagement.model";
-import { createListing, presentProduct, searchProducts, setListingStatus, updateListingImages } from "../services/catalog.service";
+import { activePublic, createListing, presentProduct, searchProducts, setListingStatus, updateListingImages } from "../services/catalog.service";
 import { assertCanAddEmployee } from "../services/entitlement.service";
 import {
   addCartItem,
@@ -57,6 +57,9 @@ import { buyerAssistant, listingAssistant, pricingAssistant, recordRiskSignal, r
 import { notify } from "../services/notification.service";
 import { audit } from "../services/audit.service";
 import { emitToUser } from "../realtime/io";
+import { openInspectionChat } from "../services/chat.service";
+import { showroom } from "./showroom";
+import { adminShowroom, support } from "./admin-showroom";
 import { decryptSecret, encryptSecret, hashIdentifier, lastDigits, slugify } from "../common/crypto";
 import { addDays } from "../common/time";
 import { AIJob } from "../models/engagement.model";
@@ -171,7 +174,9 @@ api.post(
         name: body.name,
         slug: `${slug}-${String(user._id).slice(-4)}`,
         email,
-        verificationStatus: "pending",
+        verificationStatus: "draft",
+        owner: { name: body.name, email },
+        statusHistory: [{ status: "draft", note: "Account created" }],
         location,
         address: { city: body.city, district: body.district, state: "Kerala" },
       });
@@ -186,6 +191,37 @@ api.post(
     }
     const token = signDevToken({ uid: user.firebaseUid, email, name: body.name });
     sendData(res, { token }, undefined, 201);
+  }),
+);
+
+/** A signed-in (Firebase) account opts into the seller or partner panel. Admin access is never self-service. */
+api.post(
+  "/auth/panel-enroll",
+  requireUser,
+  asyncHandler(async (req, res) => {
+    const body = z.object({ panel: z.enum(["showroom", "partner"]), name: z.string().trim().min(2).max(80) }).parse(req.body);
+    const user = await User.findById(req.user!._id);
+    if (!user) throw notFound();
+    const role = body.panel === "partner" ? "service_partner" : "business_seller";
+    if (!user.roles.includes(role)) user.roles.push(role);
+    await user.save();
+    if (body.panel === "partner") {
+      await PartnerProfile.updateOne(
+        { userId: user._id },
+        { $setOnInsert: { userId: user._id, name: body.name, email: user.email, categories: ["smartphones", "laptops"], verificationStatus: "draft", serviceRadiusKm: 20 } },
+        { upsert: true },
+      );
+    } else {
+      const { findOwnShowroom, saveApplication } = await import("../services/showroom.service");
+      if (!(await findOwnShowroom(user._id))) await saveApplication(req, { name: body.name, owner: { name: user.displayName, email: user.email || undefined } });
+      await SellerProfile.updateOne(
+        { userId: user._id },
+        { $setOnInsert: { userId: user._id, slug: `seller-${String(user._id).slice(-6)}`, displayName: body.name } },
+        { upsert: true },
+      );
+    }
+    await audit(req, "panel.enrolled", "User", String(user._id), { panel: body.panel });
+    sendData(res, await publicUser(String(user._id)));
   }),
 );
 
@@ -372,8 +408,8 @@ api.post(
       hours: body.hours || "",
       logoKey: body.logoKey,
       bannerKey: body.bannerKey,
-      documents: body.documentKeys.map((key) => ({ key, name: "registration", status: "pending" })),
-      verificationStatus: "pending",
+      documents: body.documentKeys.map((key) => ({ key, name: "registration", kind: "trade_license", status: "pending" })),
+      verificationStatus: "draft",
       location: coordinates,
     });
     await audit(req, "business.submitted", "Business", String(business._id));
@@ -499,7 +535,7 @@ api.get(
 api.get(
   "/products/:slug",
   asyncHandler(async (req, res) => {
-    const product = await Product.findOne({ slug: req.params.slug, deletedAt: null, status: { $in: ["active", "reserved", "sold"] } }).lean();
+    const product = await Product.findOne({ slug: req.params.slug, deletedAt: null, published: { $ne: false }, businessHold: { $ne: true }, status: { $in: ["active", "reserved", "sold"] } }).lean();
     if (!product) throw notFound("Listing not found.");
     const seller = await SellerProfile.findOne({ userId: product.sellerUserId }).lean();
     const business = product.businessId ? await Business.findById(product.businessId).lean() : null;
@@ -507,8 +543,7 @@ api.get(
     const similar = await Product.find({
       _id: { $ne: product._id },
       categorySlug: product.categorySlug,
-      status: "active",
-      deletedAt: null,
+      ...activePublic,
     }).sort({ createdAt: -1 }).limit(4).lean();
     sendData(res, {
       product: presentProduct(product as never, true),
@@ -560,7 +595,7 @@ api.post(
 api.get(
   "/marketplace/home",
   asyncHandler(async (_req, res) => {
-    const live = { status: "active", deletedAt: null, "inventory.state": { $ne: "sold" } };
+    const live = activePublic;
     const settings = await PlatformSetting.findOne({ key: "platform" }).lean();
     const [featured, recent, inspected, refurbished, laptops, categories, brands, showrooms, sellers, reviews] = await Promise.all([
       Product.find({ ...live, featuredUntil: { $gt: new Date() } }).sort({ featuredUntil: -1 }).limit(8).lean(),
@@ -869,7 +904,7 @@ authed.post(
 authed.post(
   "/inspections/checkout",
   asyncHandler(async (req, res) => {
-    const body = z.object({ productId: z.string(), planCode: z.string(), publishOnListing: z.boolean().default(false) }).parse(req.body);
+    const body = z.object({ productId: z.string(), planCode: z.string(), publishOnListing: z.boolean().default(false), mode: z.enum(["physical", "online"]).default("physical") }).parse(req.body);
     sendData(res, await startInspectionCheckout(req, body));
   }),
 );
@@ -1079,8 +1114,14 @@ authed.patch(
   "/seller/orders/:orderId/suborders/:subId",
   asyncHandler(async (req, res) => {
     const status = z.enum(["confirmed", "shipped", "delivered", "cancelled"]).parse(req.body?.status);
-    const order = await Order.findOne({ _id: req.params.orderId, "subOrders._id": req.params.subId, "subOrders.sellerUserId": req.user!._id });
+    const order = await Order.findOne({ _id: req.params.orderId, subOrders: { $elemMatch: { _id: req.params.subId, sellerUserId: req.user!._id } } });
     if (!order && !req.permissions?.has("*")) throw forbidden();
+    const current = order?.subOrders.id(req.params.subId);
+    if (current?.businessId) throw new AppError(409, "USE_SHOWROOM_PANEL", "Showroom orders are managed in the seller panel.");
+    const steps: Record<string, string[]> = { paid: ["confirmed", "cancelled"], confirmed: ["shipped", "cancelled"], shipped: ["delivered"] };
+    if (current && !(steps[current.status] || []).includes(status)) {
+      throw new AppError(409, "INVALID_TRANSITION", `An order that is ${current.status.replace(/_/g, " ")} can't be marked ${status}.`);
+    }
     const target = await Order.findOneAndUpdate(
       { _id: req.params.orderId, "subOrders._id": req.params.subId },
       { $set: { "subOrders.$.status": status } },
@@ -1151,13 +1192,6 @@ authed.post(
   }),
 );
 authed.post(
-  "/support",
-  asyncHandler(async (req, res) => {
-    const body = z.object({ subject: z.string().min(3), body: z.string().min(3) }).parse(req.body);
-    sendData(res, await SupportTicket.create({ userId: req.user!._id, ...body }), undefined, 201);
-  }),
-);
-authed.post(
   "/disputes",
   asyncHandler(async (req, res) => {
     const body = z.object({ type: z.enum(["order", "inspection", "review"]), referenceId: z.string(), reason: z.string().min(5) }).parse(req.body);
@@ -1221,6 +1255,8 @@ authed.post(
     partner.stats!.openJobs += 1;
     await partner.save();
     await notify({ userId: String(request.buyerId), event: "inspection.accepted", title: "Inspection accepted", body: "A partner accepted your inspection request.", data: { requestId: String(request._id) } });
+    await openInspectionChat(request, String(req.user!._id));
+    await notify({ userId: String(request.sellerUserId), event: "inspection.accepted", title: "Inspection partner assigned", body: `Inspection ${request.number} was accepted. Coordinate access in Messages.`, data: { requestId: String(request._id) } });
     sendData(res, request);
   }),
 );
@@ -1410,11 +1446,8 @@ admin.patch(
   "/businesses/:id/verification",
   asyncHandler(async (req, res) => {
     const body = z.object({ status: z.enum(["approved", "rejected"]), reason: z.string().optional() }).parse(req.body);
-    const business = await Business.findByIdAndUpdate(req.params.id, { verificationStatus: body.status, rejectionReason: body.reason }, { new: true });
-    if (!business) throw notFound();
-    await audit(req, "business.verification", "Business", String(business._id), body);
-    await notify({ userId: String(business.ownerId), event: "business.verification", title: `Business ${body.status}`, body: body.reason || `Your business is ${body.status}.` });
-    sendData(res, business);
+    const { reviewShowroom } = await import("../services/showroom.service");
+    sendData(res, await reviewShowroom(req, req.params.id, body.status === "approved" ? "approve" : "reject", body.reason || (body.status === "rejected" ? "Rejected by SureGad" : undefined)));
   }),
 );
 admin.patch(
@@ -1629,8 +1662,11 @@ api.post(
 
 api.use("/chat", chat);
 api.use(storefront);
+api.use(showroom);
+api.use(support);
 api.use(authed);
 api.use("/admin", admin);
+admin.use(adminShowroom);
 
 async function publicUser(id: string) {
   const user = await User.findById(id).lean();

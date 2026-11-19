@@ -6,6 +6,8 @@ import { asyncHandler, sendData } from "../common/http";
 import { AppError, notFound } from "../common/errors";
 import { Conversation, Enquiry, Message, Offer, SupportTicket } from "../models/engagement.model";
 import { Product } from "../models/catalog.model";
+import { Order } from "../models/commerce.model";
+import { InspectionRequest } from "../models/inspection.model";
 import { Business } from "../models/profiles.model";
 import { User } from "../models/user.model";
 import { emitToUser, isOnline } from "../realtime/io";
@@ -98,7 +100,9 @@ chat.get(
       const unread = Number((conversation.unread as Record<string, number> | undefined)?.[userId] || 0);
       return {
         id: String(conversation._id),
-        role: buyerId === userId ? "buying" : "selling",
+        kind: conversation.kind || "listing",
+        inspectionRequestId: conversation.inspectionRequestId ? String(conversation.inspectionRequestId) : null,
+        role: conversation.kind === "inspection" ? "inspection" : buyerId === userId ? "buying" : "selling",
         product: productSummary(productById.get(String(conversation.productId))),
         other: userSummary(userById.get(otherId)),
         lastPreview: conversation.lastPreview || "",
@@ -110,7 +114,7 @@ chat.get(
         offer: presentOffer(latestOffer.get(String(conversation._id))),
       };
     });
-    if (box === "buying" || box === "selling") items = items.filter((item) => item.role === box);
+    if (box === "buying" || box === "selling" || box === "inspection") items = items.filter((item) => item.role === box);
     if (filter === "unread") items = items.filter((item) => item.unread > 0);
     if (filter === "offers") items = items.filter((item) => item.offer);
     if (q) items = items.filter((item) => `${item.product?.title || ""} ${item.other.name}`.toLowerCase().includes(q));
@@ -182,9 +186,16 @@ chat.get(
       const business = product.businessId ? await Business.findById(product.businessId).select("phone").lean() : null;
       canCall = Boolean(business?.phone || (other?.sharePhone && other.phone));
     }
+    const inspection = conversation.inspectionRequestId
+      ? await InspectionRequest.findById(conversation.inspectionRequestId).select("number status mode appointmentAt").lean()
+      : null;
     sendData(res, {
       id: String(conversation._id),
-      role: userId === buyerId ? "buying" : "selling",
+      kind: conversation.kind || "listing",
+      inspection: inspection
+        ? { id: String(inspection._id), number: inspection.number, status: inspection.status, mode: inspection.mode, appointmentAt: inspection.appointmentAt || null }
+        : null,
+      role: conversation.kind === "inspection" ? "inspection" : userId === buyerId ? "buying" : "selling",
       product: productSummary(product),
       other: userSummary(other),
       important: (conversation.importantFor || []).some((id) => String(id) === userId),
@@ -221,11 +232,22 @@ chat.post(
   asyncHandler(async (req, res) => {
     const userId = me(req);
     const body = z
-      .object({ body: z.string().trim().max(4000).optional(), imageKey: z.string().max(300).optional() })
+      .object({ body: z.string().trim().max(4000).optional(), imageKey: z.string().max(300).optional(), orderId: z.string().optional() })
       .refine((value) => value.body || value.imageKey, "Write a message or attach a photo.")
       .parse(req.body);
     const conversation = await loadConversation(req.params.id, userId);
     assertNotBlocked(conversation, userId);
+    let orderId: string | undefined;
+    if (body.orderId) {
+      // Only an order between these two people can be referenced.
+      const { buyerId, sellerUserId } = roles(conversation);
+      const order = Types.ObjectId.isValid(body.orderId)
+        ? await Order.findOne({ _id: body.orderId, buyerId, "subOrders.sellerUserId": sellerUserId }).select("number").lean()
+        : null;
+      if (!order) throw new AppError(400, "INVALID_ORDER", "That order is not part of this conversation.");
+      orderId = String(order._id);
+      body.body = body.body || `Order ${order.number}`;
+    }
     if (body.imageKey) {
       if (!body.imageKey.startsWith(`public/chat_image/${userId}/`) || body.imageKey.includes("..")) {
         throw new AppError(400, "INVALID_IMAGE", "Upload the photo again before sending.");
@@ -239,7 +261,7 @@ chat.post(
       sendData(res, message, undefined, 201);
       return;
     }
-    sendData(res, await postMessage(conversation, userId, { body: body.body! }), undefined, 201);
+    sendData(res, await postMessage(conversation, userId, { body: body.body!, orderId }), undefined, 201);
   }),
 );
 
@@ -324,6 +346,7 @@ chat.post(
     const body = z.object({ amountPaise: z.number().int().positive() }).parse(req.body);
     const conversation = await loadConversation(req.params.id, userId);
     assertNotBlocked(conversation, userId);
+    if (conversation.kind === "inspection") throw new AppError(400, "NO_OFFERS", "Offers are not available in inspection chats.");
     const { buyerId, sellerUserId } = roles(conversation);
     const product = await Product.findById(conversation.productId);
     if (!product || product.deletedAt || product.status !== "active" || product.inventory?.state !== "available") {

@@ -68,7 +68,7 @@ async function reviewSummary(targetType: "seller" | "business", targetId: unknow
 }
 
 async function listingsFor(filter: Record<string, unknown>) {
-  const rows = await Product.find({ ...filter, deletedAt: null, status: { $in: ["active", "reserved", "sold"] } })
+  const rows = await Product.find({ ...filter, deletedAt: null, published: { $ne: false }, businessHold: { $ne: true }, status: { $in: ["active", "reserved", "sold"] } })
     .sort({ status: 1, createdAt: -1 })
     .limit(120)
     .lean();

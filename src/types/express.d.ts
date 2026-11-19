@@ -21,6 +21,7 @@ declare global {
     interface Request {
       user?: AuthUser;
       permissions?: Set<string>;
+      emailVerified?: boolean;
       rawBody?: Buffer;
     }
   }

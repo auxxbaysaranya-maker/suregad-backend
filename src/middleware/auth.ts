@@ -49,6 +49,7 @@ export async function requireUser(req: Request, _res: Response, next: NextFuncti
       throw new AppError(401, "SESSION_REVOKED", "This session was revoked. Sign in again.");
     }
     req.user = user as Express.Request["user"];
+    req.emailVerified = identity.emailVerified !== false;
     req.permissions = await permissionsFor(user.roles, user.employeeGrants || []);
     next();
   } catch (error) {

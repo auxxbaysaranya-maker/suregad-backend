@@ -20,6 +20,9 @@ const enquirySchema = new Schema(
 const conversationSchema = new Schema(
   {
     participantIds: { type: [Schema.Types.ObjectId], ref: "User", index: true },
+    /** "listing" = buyer and seller about a listing; "inspection" = seller and service partner about one inspection. */
+    kind: { type: String, enum: ["listing", "inspection"], default: "listing" },
+    inspectionRequestId: { type: Schema.Types.ObjectId, ref: "InspectionRequest" },
     productId: Schema.Types.ObjectId,
     enquiryId: Schema.Types.ObjectId,
     buyerId: { type: Schema.Types.ObjectId, ref: "User" },
@@ -47,6 +50,8 @@ const messageSchema = new Schema(
     /** Text, or a readable summary for offer/system/image messages. */
     body: { type: String, required: true, maxlength: 4000 },
     imageUrl: String,
+    /** Optional order the message refers to (seller sharing an order update). */
+    orderId: { type: Schema.Types.ObjectId, ref: "Order" },
     offerId: { type: Schema.Types.ObjectId, ref: "Offer" },
     readBy: { type: [Schema.Types.ObjectId], default: [] },
     reported: { type: Boolean, default: false },
@@ -92,6 +97,12 @@ const reviewSchema = new Schema(
     inspectionOnly: { type: Boolean, default: false },
     status: { type: String, enum: ["published", "hidden", "flagged"], default: "published" },
     sellerReply: String,
+    sellerRepliedAt: Date,
+    businessId: { type: Schema.Types.ObjectId, ref: "Business", index: true },
+    reports: {
+      type: [{ by: Schema.Types.ObjectId, reason: String, at: { type: Date, default: Date.now }, status: { type: String, default: "open" } }],
+      default: [],
+    },
     fraudSignals: { type: [String], default: [] },
   },
   { timestamps: true },
@@ -115,9 +126,11 @@ const notificationSchema = new Schema(
 const disputeSchema = new Schema(
   {
     openedBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
-    type: { type: String, enum: ["order", "inspection", "review"], required: true },
+    type: { type: String, enum: ["order", "inspection", "review", "return"], required: true },
     referenceId: { type: Schema.Types.ObjectId, required: true },
     reason: { type: String, required: true },
+    against: { type: Schema.Types.ObjectId, ref: "User" },
+    businessId: { type: Schema.Types.ObjectId, ref: "Business" },
     status: { type: String, enum: ["open", "under_review", "resolved", "rejected"], default: "open" },
     resolution: String,
   },
@@ -127,9 +140,32 @@ const disputeSchema = new Schema(
 const supportTicketSchema = new Schema(
   {
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    number: { type: String, unique: true, sparse: true },
+    businessId: { type: Schema.Types.ObjectId, ref: "Business", index: true },
     subject: { type: String, required: true },
     body: { type: String, required: true },
-    status: { type: String, enum: ["open", "pending", "resolved"], default: "open" },
+    category: {
+      type: String,
+      enum: ["account", "verification", "listings", "orders", "payments", "delivery", "returns", "inspections", "subscription", "technical", "other"],
+      default: "other",
+    },
+    priority: { type: String, enum: ["low", "normal", "high", "urgent"], default: "normal" },
+    attachments: { type: [{ key: String, name: String }], default: [] },
+    status: { type: String, enum: ["open", "pending", "waiting_on_user", "resolved", "closed"], default: "open" },
+    assignedTo: { type: Schema.Types.ObjectId, ref: "User" },
+    messages: {
+      type: [
+        {
+          authorId: Schema.Types.ObjectId,
+          fromStaff: { type: Boolean, default: false },
+          body: String,
+          attachments: { type: [{ key: String, name: String }], default: [] },
+          at: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
+    lastActivityAt: { type: Date, default: Date.now },
   },
   { timestamps: true },
 );

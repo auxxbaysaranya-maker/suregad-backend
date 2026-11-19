@@ -9,6 +9,9 @@ import { seedSystemData } from "./seed/run";
 import { startNotificationWorker } from "./services/notification.service";
 import { releaseExpiredReservations } from "./services/commerce.service";
 import { expireOffers } from "./services/inspection.service";
+import { startShowroomJobs } from "./services/promotion.service";
+import { migrateShowrooms } from "./seed/showroom-migration";
+import { restoreDemoDocuments } from "./seed/demo-applicants";
 import { verifyIdentity } from "./integrations/firebase";
 import { User } from "./models/user.model";
 import { emitToUser, markConnected, markDisconnected, setIo } from "./realtime/io";
@@ -74,6 +77,9 @@ async function main() {
   await connectDb();
   if (mongoose.connection.readyState === 1) await seedSystemData();
   startNotificationWorker();
+  if (mongoose.connection.readyState === 1) await migrateShowrooms().catch((error) => logger.error({ err: error }, "Showroom migration failed"));
+  if (mongoose.connection.readyState === 1) await restoreDemoDocuments().catch((error) => logger.warn({ err: error }, "Demo document restore failed"));
+  startShowroomJobs();
   setInterval(() => {
     if (mongoose.connection.readyState !== 1) return;
     releaseExpiredReservations().catch((error) => logger.error(error));

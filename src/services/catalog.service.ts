@@ -8,7 +8,7 @@ import { mediaUrl } from "../integrations/storage";
 import { assertCanCreateListing, getEntitlements, recordUsage } from "./entitlement.service";
 import type { Request } from "express";
 
-const activePublic = { status: "active", deletedAt: null, "inventory.state": { $ne: "sold" } };
+export const activePublic = { status: "active", deletedAt: null, "inventory.state": { $ne: "sold" }, published: { $ne: false }, businessHold: { $ne: true } };
 
 export function presentProduct(product: Record<string, unknown>, detailed = false) {
   const images = ((product.images as { key?: string; url?: string; sort?: number }[]) || []).map((image) => ({
@@ -39,7 +39,7 @@ export function presentProduct(product: Record<string, unknown>, detailed = fals
     district: product.district,
     state: product.state,
     images,
-    status: product.status,
+    status: publicStatus(product),
     stats: product.stats,
     featured: Boolean(product.featuredUntil && new Date(String(product.featuredUntil)) > new Date()),
     inspection: inspection.published
@@ -52,7 +52,23 @@ export function presentProduct(product: Record<string, unknown>, detailed = fals
       : { inspected: false },
     geo: approximateGeo(product.location),
     createdAt: product.createdAt,
+    listingCode: product.listingCode || undefined,
+    itemType: product.itemType || "used",
+    stock: product.stockTracked ? { available: Number((product.stock as { available?: number } | undefined)?.available || 0) } : undefined,
+    warrantyMonths: product.warrantyMonths || 0,
+    returnWindowDays: product.returnWindowDays || 0,
+    deliveryAvailable: product.deliveryAvailable !== false,
+    pickupAvailable: product.pickupAvailable !== false,
   };
+}
+
+/** Buyers see a stock-tracked listing as reserved/sold only when no unit is left to buy. */
+function publicStatus(product: Record<string, unknown>) {
+  if (product.status !== "active") return product.status;
+  if (product.published === false || product.businessHold === true) return "archived";
+  if (!product.stockTracked) return product.status;
+  const state = (product.inventory as { state?: string } | undefined)?.state;
+  return state === "available" ? "active" : state === "reserved" ? "reserved" : "sold";
 }
 
 /** Listing position rounded to two decimals (about 1 km) so the map shows the area, not the doorstep. */

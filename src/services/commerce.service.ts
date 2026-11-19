@@ -15,6 +15,8 @@ import { notify } from "./notification.service";
 import { qualifyReferral } from "./growth.service";
 import { allocatePartner } from "./inspection.service";
 import { audit } from "./audit.service";
+import { markOrderUnitsSold, releaseOrderUnits, reserveUnit } from "./inventory.service";
+import { onOrderPaid } from "./showroom-orders.service";
 import type { Request } from "express";
 
 const RESERVATION_MINUTES = 15;
@@ -49,7 +51,7 @@ export async function getCart(userId: string) {
 }
 
 export async function addCartItem(userId: string, productId: string) {
-  const product = await Product.findOne({ _id: productId, deletedAt: null, status: "active" });
+  const product = await Product.findOne({ _id: productId, deletedAt: null, status: "active", published: { $ne: false }, businessHold: { $ne: true } });
   if (!product || product.inventory?.state !== "available") {
     throw new AppError(409, "UNAVAILABLE", "This device is not available to purchase.");
   }
@@ -105,12 +107,23 @@ export async function checkout(req: Request, input: { addressId?: string; fulfil
     throw new AppError(400, "ADDRESS_REQUIRED", "Choose a saved delivery address.");
   }
   const reserved: string[] = [];
+  /** Stock-tracked showroom listings reserve one physical unit; productId → unit. */
+  const units = new Map<string, { _id: unknown; code: string }>();
   const expires = new Date(Date.now() + RESERVATION_MINUTES * 60 * 1000);
   const orderId = new (await import("mongoose")).Types.ObjectId();
   try {
     for (const id of ids) {
+      if (!mongoose.isValidObjectId(id)) throw new AppError(400, "UNAVAILABLE", "One of the devices could not be found.");
+      const tracked = await Product.findOne({ _id: id, stockTracked: true, status: "active", published: { $ne: false }, businessHold: { $ne: true }, deletedAt: null, sellerUserId: { $ne: user._id } });
+      if (tracked) {
+        const unit = await reserveUnit(tracked._id, orderId, expires, user._id as never);
+        if (!unit) throw new AppError(409, "UNAVAILABLE", `${tracked.title} just went out of stock. Review your cart.`);
+        units.set(String(tracked._id), { _id: unit._id, code: unit.code });
+        reserved.push(String(tracked._id));
+        continue;
+      }
       const updated = await Product.findOneAndUpdate(
-        { _id: id, status: "active", "inventory.state": "available", deletedAt: null, sellerUserId: { $ne: user._id } },
+        { _id: id, stockTracked: { $ne: true }, published: { $ne: false }, businessHold: { $ne: true }, status: "active", "inventory.state": "available", deletedAt: null, sellerUserId: { $ne: user._id } },
         { $set: { status: "reserved", "inventory.state": "reserved", "inventory.reservedUntil": expires, "inventory.reservedOrderId": orderId } },
         { new: true },
       );
@@ -138,6 +151,8 @@ export async function checkout(req: Request, input: { addressId?: string; fulfil
         title: product.title,
         pricePaise: priceOf(product),
         quantity: 1,
+        unitId: units.get(String(product._id))?._id,
+        unitCode: units.get(String(product._id))?.code,
       })),
       amountPaise: group.reduce((sum, product) => sum + priceOf(product), 0),
       status: "pending_payment",
@@ -200,6 +215,7 @@ export async function checkout(req: Request, input: { addressId?: string; fulfil
       mock: provider.name === "mock",
     };
   } catch (error) {
+    await releaseOrderUnits(orderId, "checkout_failed");
     await Product.updateMany(
       { _id: { $in: reserved }, "inventory.reservedOrderId": orderId, "inventory.state": "reserved" },
       { $set: { status: "active", "inventory.state": "available" }, $unset: { "inventory.reservedUntil": 1, "inventory.reservedOrderId": 1 } },
@@ -249,6 +265,8 @@ export async function applyCapturedPayment(gatewayOrderId: string, gatewayPaymen
         { "inventory.reservedOrderId": order._id, "inventory.state": "reserved" },
         { $set: { status: "sold", "inventory.state": "sold" } },
       );
+      await markOrderUnitsSold(order._id, order.buyerId);
+      await onOrderPaid(String(order._id));
       await markOffersPurchased(order._id, order.number);
       if (order.couponCode) await Coupon.updateOne({ code: order.couponCode }, { $inc: { usedCount: 1 } });
       await qualifyReferral(String(order.buyerId), String(order._id));
@@ -347,6 +365,7 @@ export async function releaseExpiredReservations(): Promise<void> {
       { "inventory.reservedOrderId": order._id, "inventory.state": "reserved" },
       { $set: { status: "active", "inventory.state": "available" }, $unset: { "inventory.reservedUntil": 1, "inventory.reservedOrderId": 1 } },
     );
+    await releaseOrderUnits(order._id, "payment_timeout");
     await Payment.updateOne({ _id: order.paymentId, status: "created" }, { status: "failed" });
   }
 }
@@ -390,13 +409,32 @@ export async function processRefund(req: Request, refundId: string, approve: boo
   if (refund.orderId) {
     const order = await Order.findById(refund.orderId);
     if (order) {
-      order.status = payment.status === "refunded" ? "refunded" : "partially_refunded";
+      // Sub-order refunds (rejected orders, returns) only touch that seller's part.
+      const subs = refund.subOrderId ? order.subOrders.filter((sub) => String(sub._id) === String(refund.subOrderId)) : order.subOrders;
+      for (const sub of subs) {
+        sub.status = "refunded";
+        sub.timeline.push({ status: "refunded", note: "Refund processed", at: new Date() });
+      }
+      order.status = order.subOrders.every((sub) => sub.status === "refunded")
+        ? "refunded"
+        : "partially_refunded";
       await order.save();
-      await Product.updateMany(
-        { _id: { $in: order.items.map((item) => item.productId) }, "inventory.state": "sold" },
-        { $set: { status: "active", "inventory.state": "available" }, $unset: { "inventory.reservedOrderId": 1 } },
-      );
+      // Single-device listings go back on sale. Stock-tracked units are restocked by the seller after inspection.
+      const legacyIds = subs.flatMap((sub) => sub.items).filter((item) => !item.unitId).map((item) => item.productId);
+      if (!refund.returnId && legacyIds.length) {
+        await Product.updateMany(
+          { _id: { $in: legacyIds }, stockTracked: { $ne: true }, "inventory.state": "sold" },
+          { $set: { status: "active", "inventory.state": "available" }, $unset: { "inventory.reservedOrderId": 1 } },
+        );
+      }
     }
+  }
+  if (refund.returnId) {
+    const { ReturnRequest } = await import("../models/showroom.model");
+    await ReturnRequest.updateOne(
+      { _id: refund.returnId },
+      { $set: { status: "refunded" }, $push: { timeline: { status: "refunded", note: "Refund processed by SureGad", at: new Date() } } },
+    );
   }
   await notify({
     userId: String(refund.userId),
@@ -408,7 +446,7 @@ export async function processRefund(req: Request, refundId: string, approve: boo
   return refund;
 }
 
-export async function startInspectionCheckout(req: Request, input: { productId: string; planCode: string; publishOnListing: boolean }) {
+export async function startInspectionCheckout(req: Request, input: { productId: string; planCode: string; publishOnListing: boolean; mode?: "physical" | "online" }) {
   const user = req.user;
   if (!user) throw forbidden();
   const product = await Product.findOne({ _id: input.productId, status: { $in: ["active", "reserved"] }, deletedAt: null });
@@ -427,6 +465,8 @@ export async function startInspectionCheckout(req: Request, input: { productId: 
     planId: plan._id,
     status: "pending_payment",
     publishOnListing: input.publishOnListing,
+    mode: input.mode || "physical",
+    businessId: product.businessId,
   });
   const gateway = await provider.createOrder({
     amountPaise: plan.pricePaise,

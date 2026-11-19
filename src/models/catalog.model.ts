@@ -87,6 +87,36 @@ const productSchema = new Schema(
       published: { type: Boolean, default: false },
     },
     featuredUntil: Date,
+    /** Showroom listing code, e.g. SG-LIST-000001. */
+    listingCode: { type: String, unique: true, sparse: true },
+    itemType: { type: String, enum: ["new", "used", "refurbished"], default: "used" },
+    /** Showroom listings sell individual inventory units; stock counts are kept in sync by the inventory service. */
+    stockTracked: { type: Boolean, default: false },
+    stock: {
+      available: { type: Number, default: 0 },
+      reserved: { type: Number, default: 0 },
+      sold: { type: Number, default: 0 },
+    },
+    lowStockThreshold: Number,
+    lowStockNotifiedAt: Date,
+    deliveryAvailable: { type: Boolean, default: true },
+    pickupAvailable: { type: Boolean, default: true },
+    warrantyMonths: { type: Number, default: 0 },
+    returnWindowDays: { type: Number, default: 0 },
+    /** Price before an active promotion; restored when it ends. */
+    promo: {
+      promotionId: { type: Schema.Types.ObjectId, ref: "Promotion" },
+      basePricePaise: Number,
+      endsAt: Date,
+    },
+    priceHistory: {
+      type: [{ pricePaise: Number, reason: String, by: Schema.Types.ObjectId, at: { type: Date, default: Date.now } }],
+      default: [],
+    },
+    /** Seller toggle: unpublished listings stay in the panel but are hidden from buyers. */
+    published: { type: Boolean, default: true },
+    /** Set while the showroom is suspended or revoked. */
+    businessHold: { type: Boolean, default: false },
     deletedAt: { type: Date, default: null },
   },
   { timestamps: true },

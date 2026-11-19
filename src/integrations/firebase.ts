@@ -11,6 +11,8 @@ export interface AuthIdentity {
   name?: string;
   picture?: string;
   authTime?: number;
+  /** False only for Firebase accounts whose email is not verified yet. */
+  emailVerified?: boolean;
 }
 
 let appReady = false;
@@ -93,7 +95,7 @@ function verifyDevToken(token: string): AuthIdentity | null {
   if (!payload.exp || payload.exp < Date.now()) {
     throw new AppError(401, "TOKEN_EXPIRED", "Development token has expired.");
   }
-  return { uid: payload.uid, email: payload.email, phone: payload.phone, name: payload.name };
+  return { uid: payload.uid, email: payload.email, phone: payload.phone, name: payload.name, emailVerified: true };
 }
 
 export async function ensureEmailUser(input: { email: string; password: string; name: string }): Promise<string | null> {
@@ -136,6 +138,7 @@ export async function verifyIdentity(token: string): Promise<AuthIdentity> {
       name: decoded.name,
       picture: decoded.picture,
       authTime: decoded.auth_time,
+      emailVerified: decoded.email ? Boolean(decoded.email_verified) : true,
     };
   } catch {
     throw new AppError(401, "INVALID_TOKEN", "Firebase ID token could not be verified.");

@@ -7,6 +7,7 @@ import { User } from "../models/user.model";
 import { sendEmail, sendSms, sendWhatsApp } from "../integrations/channels";
 import { sendWebPush } from "../integrations/push";
 import { sendFirebasePush } from "../integrations/firebase";
+import { emitToUser } from "../realtime/io";
 
 type NotifyInput = {
   userId: string;
@@ -77,13 +78,21 @@ export async function notify(input: NotifyInput): Promise<void> {
     push: false,
   };
   if (prefs.inApp !== false) {
-    await Notification.create({
+    const saved = await Notification.create({
       userId: user._id,
       event: input.event,
       title: input.title,
       body: input.body,
       data: input.data,
       channels: ["in_app"],
+    });
+    emitToUser(String(user._id), "notification", {
+      id: String(saved._id),
+      event: saved.event,
+      title: saved.title,
+      body: saved.body,
+      data: saved.data,
+      createdAt: saved.createdAt,
     });
   }
   const payload: Delivery = {

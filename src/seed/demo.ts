@@ -147,6 +147,7 @@ export async function seedDemoData(): Promise<void> {
         phone: "+910000000000",
         description: "Demo refurbished-electronics store.",
         verificationStatus: "approved",
+        address: { label: "Showroom", line1: "MG Road", city: kochi.city, district: kochi.district, state: "Kerala", pincode: kochi.pincode, coordinates: { lat: kochi.lat, lng: kochi.lng } },
         location: { type: "Point", coordinates: [kochi.lng, kochi.lat] },
       },
     },

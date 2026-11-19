@@ -57,7 +57,7 @@ export function presentOffer(offer: OfferLike | null | undefined) {
 }
 
 export function presentMessage(
-  message: { _id: unknown; conversationId: unknown; senderId: unknown; kind?: string | null; body: string; imageUrl?: string | null; offerId?: unknown; readBy?: unknown[]; createdAt?: Date },
+  message: { _id: unknown; conversationId: unknown; senderId: unknown; kind?: string | null; body: string; imageUrl?: string | null; offerId?: unknown; orderId?: unknown; readBy?: unknown[]; createdAt?: Date },
   offer?: OfferLike | null,
 ) {
   return {
@@ -67,6 +67,7 @@ export function presentMessage(
     kind: message.kind || "text",
     body: message.body,
     imageUrl: message.imageUrl || null,
+    orderId: message.orderId ? String(message.orderId) : null,
     offer: presentOffer(offer),
     readBy: (message.readBy || []).map(String),
     createdAt: message.createdAt,
@@ -80,7 +81,7 @@ export function presentMessage(
 export async function postMessage(
   conversation: ConversationDoc,
   senderId: string,
-  input: { kind?: "text" | "image" | "offer" | "system"; body: string; imageUrl?: string; offerId?: unknown; preview?: string },
+  input: { kind?: "text" | "image" | "offer" | "system"; body: string; imageUrl?: string; offerId?: unknown; orderId?: string; preview?: string },
 ) {
   const kind = input.kind || "text";
   const message = await Message.create({
@@ -90,6 +91,7 @@ export async function postMessage(
     body: input.body,
     imageUrl: input.imageUrl,
     offerId: input.offerId,
+    orderId: input.orderId,
     readBy: kind === "system" ? [] : [senderId],
   });
   const participants = conversation.participantIds.map(String);
@@ -138,4 +140,36 @@ export async function markOffersPurchased(orderId: unknown, orderNumber: string)
       });
     }
   }
+}
+
+/**
+ * Seller ↔ service-partner thread for one inspection, opened when the partner accepts the job.
+ * The partner is stored in buyerId so each side resolves the other; offers are disabled for this kind.
+ */
+export async function openInspectionChat(
+  request: { _id: unknown; number: string; mode?: string | null; sellerUserId: unknown; productId: unknown; conversationId?: unknown; save: () => Promise<unknown> },
+  partnerUserId: string,
+) {
+  const sellerUserId = String(request.sellerUserId);
+  if (sellerUserId === partnerUserId) return null;
+  let conversation = await Conversation.findOne({ kind: "inspection", inspectionRequestId: request._id });
+  if (!conversation) {
+    conversation = await Conversation.create({
+      kind: "inspection",
+      inspectionRequestId: request._id,
+      participantIds: [partnerUserId, sellerUserId],
+      buyerId: partnerUserId,
+      sellerUserId,
+      productId: request.productId,
+      lastMessageAt: new Date(),
+      lastPreview: "",
+    });
+    (request as { conversationId?: unknown }).conversationId = conversation._id;
+    await request.save();
+    await postMessage(conversation, partnerUserId, {
+      kind: "system",
+      body: `Inspection ${request.number} (${request.mode === "online" ? "online video" : "physical"}) was accepted. Use this chat to arrange access to the device. Findings are recorded only in the partner's report.`,
+    });
+  }
+  return conversation;
 }

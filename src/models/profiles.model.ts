@@ -1,5 +1,17 @@
 import { Schema, model } from "mongoose";
 
+export const SHOWROOM_STATUSES = [
+  "draft",
+  "submitted",
+  "under_review",
+  "info_required",
+  "approved",
+  "rejected",
+  "suspended",
+  "revoked",
+] as const;
+export type ShowroomStatus = (typeof SHOWROOM_STATUSES)[number];
+
 const pointSchema = {
   type: { type: String, enum: ["Point"], default: "Point" },
   coordinates: { type: [Number] },
@@ -84,13 +96,81 @@ const businessSchema = new Schema(
     hours: { type: String, default: "" },
     tagline: { type: String, default: "" },
     social: socialSchema,
-    documents: { type: [{ key: String, name: String, status: { type: String, default: "pending" } }], default: [] },
+    documents: {
+      type: [
+        {
+          key: String,
+          name: String,
+          kind: { type: String, default: "other" },
+          status: { type: String, default: "pending" },
+          note: String,
+          uploadedAt: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
+    /** "pending" is the legacy name for "submitted". */
     verificationStatus: {
       type: String,
-      enum: ["draft", "pending", "approved", "rejected"],
-      default: "pending",
+      enum: [...SHOWROOM_STATUSES, "pending"],
+      default: "draft",
     },
     rejectionReason: String,
+    /** Showroom code, e.g. SG-SH-000001. Issued on first submission. */
+    code: { type: String, unique: true, sparse: true },
+    owner: {
+      name: String,
+      email: String,
+      mobile: String,
+      alternatePhone: String,
+    },
+    businessType: {
+      type: String,
+      enum: ["proprietorship", "partnership", "llp", "private_limited", "public_limited", "other"],
+    },
+    yearEstablished: Number,
+    pan: String,
+    registrationNumber: String,
+    profile: {
+      categories: { type: [String], default: [] },
+      brands: { type: [String], default: [] },
+      conditions: { type: [String], default: [] },
+      physicalShowroom: { type: Boolean, default: true },
+    },
+    policies: {
+      warranty: { type: String, default: "" },
+      returns: { type: String, default: "" },
+      delivery: { type: String, default: "" },
+      returnWindowDays: { type: Number, default: 7 },
+    },
+    settings: {
+      lowStockThreshold: { type: Number, default: 2 },
+      autoAcceptOrders: { type: Boolean, default: false },
+      deliveryAvailable: { type: Boolean, default: true },
+      pickupAvailable: { type: Boolean, default: true },
+    },
+    onboardingStep: { type: Number, default: 0 },
+    submittedAt: Date,
+    reviewedAt: Date,
+    reviewedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    reviewNote: String,
+    statusHistory: {
+      type: [{ status: String, note: String, by: Schema.Types.ObjectId, at: { type: Date, default: Date.now } }],
+      default: [],
+    },
+    /** Sensitive edits (legal name, GSTIN, PAN, registration, bank) wait here for admin approval. */
+    pendingChanges: {
+      fields: Schema.Types.Mixed,
+      requestedAt: Date,
+      status: { type: String, enum: ["none", "pending", "approved", "rejected"], default: "none" },
+      note: String,
+    },
+    bank: {
+      accountName: String,
+      accountNumberLast4: String,
+      ifsc: String,
+      cipher: String,
+    },
     sponsoredUntil: Date,
     location: pointSchema,
     deletedAt: Date,

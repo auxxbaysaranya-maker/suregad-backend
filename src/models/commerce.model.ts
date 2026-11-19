@@ -79,8 +79,59 @@ const orderItemSchema = new Schema(
     title: String,
     pricePaise: Number,
     quantity: { type: Number, default: 1 },
+    unitId: { type: Schema.Types.ObjectId, ref: "InventoryUnit" },
+    unitCode: String,
   },
   { _id: true },
+);
+
+export const SUBORDER_STATUSES = [
+  "pending_payment",
+  "paid",
+  "accepted",
+  "confirmed",
+  "processing",
+  "ready_for_dispatch",
+  "shipped",
+  "dispatched",
+  "delivered",
+  "rejected",
+  "cancelled",
+  "returned",
+  "refunded",
+] as const;
+
+export const DELIVERY_STATUSES = [
+  "REQUESTED",
+  "PREPARING",
+  "READY_FOR_PICKUP",
+  "PICKED_UP",
+  "IN_TRANSIT",
+  "OUT_FOR_DELIVERY",
+  "DELIVERED",
+  "FAILED",
+  "RETURNED",
+] as const;
+
+const deliverySchema = new Schema(
+  {
+    status: { type: String, enum: DELIVERY_STATUSES, default: "REQUESTED" },
+    method: { type: String, enum: ["self", "courier", "pickup"], default: "self" },
+    courier: String,
+    trackingNumber: String,
+    trackingUrl: String,
+    expectedAt: Date,
+    documents: { type: [{ key: String, name: String, at: { type: Date, default: Date.now } }], default: [] },
+    /** One-time code the buyer reads out at handover; only its hash is stored. */
+    otpHash: String,
+    otpIssuedAt: Date,
+    proof: { kind: { type: String, enum: ["otp", "photo", "signature"] }, key: String, note: String, at: Date },
+    events: {
+      type: [{ status: String, note: String, by: Schema.Types.ObjectId, at: { type: Date, default: Date.now } }],
+      default: [],
+    },
+  },
+  { _id: false },
 );
 
 const subOrderSchema = new Schema(
@@ -89,13 +140,16 @@ const subOrderSchema = new Schema(
     businessId: Schema.Types.ObjectId,
     items: [orderItemSchema],
     amountPaise: Number,
-    status: {
-      type: String,
-      enum: ["pending_payment", "paid", "confirmed", "shipped", "delivered", "cancelled", "refunded"],
-      default: "pending_payment",
-    },
+    status: { type: String, enum: SUBORDER_STATUSES, default: "pending_payment" },
     fulfillment: { type: String, enum: ["delivery", "pickup"], default: "delivery" },
     trackingNote: String,
+    rejectReason: String,
+    delivery: deliverySchema,
+    timeline: {
+      type: [{ status: String, note: String, by: Schema.Types.ObjectId, at: { type: Date, default: Date.now } }],
+      default: [],
+    },
+    deliveredAt: Date,
   },
   { _id: true },
 );
@@ -114,16 +168,7 @@ const orderSchema = new Schema(
     address: Schema.Types.Mixed,
     status: {
       type: String,
-      enum: [
-        "pending_payment",
-        "paid",
-        "confirmed",
-        "shipped",
-        "delivered",
-        "cancelled",
-        "refunded",
-        "partially_refunded",
-      ],
+      enum: [...SUBORDER_STATUSES, "partially_refunded"],
       default: "pending_payment",
     },
     reservationExpiresAt: Date,
@@ -163,6 +208,8 @@ const refundSchema = new Schema(
   {
     paymentId: { type: Schema.Types.ObjectId, ref: "Payment", required: true },
     orderId: { type: Schema.Types.ObjectId, ref: "Order" },
+    subOrderId: Schema.Types.ObjectId,
+    returnId: { type: Schema.Types.ObjectId, ref: "ReturnRequest" },
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     amountPaise: { type: Number, required: true },
     reason: String,

@@ -62,6 +62,19 @@ const inspectionRequestSchema = new Schema(
     assignedPartnerId: { type: Schema.Types.ObjectId, ref: "PartnerProfile" },
     offerExpiresAt: Date,
     notes: String,
+    /** physical = partner visits the device; online = video inspection arranged with the seller. */
+    mode: { type: String, enum: ["physical", "online"], default: "physical" },
+    businessId: { type: Schema.Types.ObjectId, ref: "Business" },
+    unitId: { type: Schema.Types.ObjectId, ref: "InventoryUnit" },
+    conversationId: { type: Schema.Types.ObjectId, ref: "Conversation" },
+    /** Arrangements the seller adds; the seller can never touch findings or the report. */
+    coordination: {
+      sellerConfirmedAt: Date,
+      deviceReady: { type: Boolean, default: false },
+      preferredSlots: { type: [String], default: [] },
+      meetingLink: String,
+      sellerNote: String,
+    },
   },
   { timestamps: true },
 );

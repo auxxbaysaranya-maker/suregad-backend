@@ -183,3 +183,23 @@ export async function uploadRemoteImage(sourceUrl: string, publicId: string): Pr
   });
   return { key: result.public_id, url: result.secure_url };
 }
+/** Store a file generated on the server (seeds, generated reports) under a storage key. */
+export async function storeServerFile(key: string, bytes: Buffer, contentType: string): Promise<void> {
+  const mode = storageMode();
+  const visibility = key.startsWith("private/") ? "private" : "public";
+  if (mode === "cloudinary") {
+    const resourceType = contentType.startsWith("video/") ? "video" : contentType === "application/pdf" ? "raw" : "image";
+    await cloudinaryClient().uploader.upload(`data:${contentType};base64,${bytes.toString("base64")}`, {
+      public_id: key,
+      type: visibility === "private" ? "authenticated" : "upload",
+      resource_type: resourceType,
+      overwrite: true,
+    });
+    return;
+  }
+  if (mode === "s3") {
+    await client().send(new PutObjectCommand({ Bucket: env.s3.bucket, Key: key, Body: bytes, ContentType: contentType }));
+    return;
+  }
+  await saveLocalUpload(key, bytes);
+}
