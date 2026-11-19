@@ -5,7 +5,7 @@ import { Business, SellerProfile } from "../models/profiles.model";
 import { AppError, forbidden, notFound } from "../common/errors";
 import { encryptSecret, hashIdentifier, lastDigits, slugify } from "../common/crypto";
 import { mediaUrl } from "../integrations/storage";
-import { assertCanCreateListing, recordUsage } from "./entitlement.service";
+import { assertCanCreateListing, getEntitlements, recordUsage } from "./entitlement.service";
 import type { Request } from "express";
 
 const activePublic = { status: "active", deletedAt: null, "inventory.state": { $ne: "sold" } };
@@ -92,6 +92,7 @@ export async function createListing(req: Request, body: unknown) {
     input.categorySlug === "smartphones"
       ? smartphoneSpecsSchema.parse(input.specs)
       : laptopSpecsSchema.parse(input.specs);
+  assertOwnImageKeys(input.imageKeys, String(user._id));
   const entitlements = await assertCanCreateListing({
     userId: String(user._id),
     businessId,
@@ -249,4 +250,51 @@ export async function listModels(categorySlug?: string, brandSlug?: string) {
     filter.brandId = brand._id;
   }
   return ProductModel.find(filter).sort({ name: 1 }).limit(200).lean();
+}
+
+/** Photo keys must come from this user's own product_image uploads. */
+function assertOwnImageKeys(keys: string[], userId: string, alreadyOnListing: Set<string> = new Set()) {
+  for (const key of keys) {
+    if (alreadyOnListing.has(key)) continue;
+    if (key.includes("..") || !key.startsWith(`public/product_image/${userId}/`)) {
+      throw new AppError(400, "INVALID_IMAGE", "One of the photos was not uploaded from this account. Upload it again.");
+    }
+  }
+}
+
+export const listingImagesSchema = z.object({
+  imageKeys: z.array(z.string().min(3).max(300)).min(1, "Keep at least one photo.").max(20),
+});
+
+/**
+ * Replace a listing's photos (add, remove or reorder; the first photo is the cover).
+ * Photos already on the listing may be kept; new ones must be the owner's uploads.
+ * The plan's photo limit applies, and an active listing goes back to review.
+ */
+export async function updateListingImages(req: Request, productId: string, body: unknown) {
+  const { imageKeys } = listingImagesSchema.parse(body);
+  const product = await Product.findOne({ _id: productId, deletedAt: null });
+  if (!product) throw notFound("Listing not found.");
+  const userId = String(req.user!._id);
+  const admin = Boolean(req.permissions?.has("*"));
+  if (String(product.sellerUserId) !== userId && !admin) throw forbidden();
+  if (product.inventory?.state === "sold") throw new AppError(409, "SOLD", "Sold listings cannot be edited.");
+  const unique = [...new Set(imageKeys)];
+  const existing = new Map((product.images || []).map((image) => [image.key || "", image.url || mediaUrl(image.key) || ""]));
+  if (!admin) assertOwnImageKeys(unique, userId, new Set(existing.keys()));
+  const entitlements = await getEntitlements({
+    userId: String(product.sellerUserId),
+    businessId: product.businessId ? String(product.businessId) : undefined,
+  });
+  const limit = entitlements.active ? entitlements.limits.photosPerListing : Math.max(existing.size, 1);
+  if (!admin && unique.length > limit) {
+    throw new AppError(403, "PHOTO_LIMIT", `Your plan allows up to ${limit} photos per listing.`);
+  }
+  product.set(
+    "images",
+    unique.map((key, sort) => ({ key, url: existing.get(key) || mediaUrl(key), sort })),
+  );
+  if (product.status === "active" && !admin) product.status = "pending_review";
+  await product.save();
+  return presentProduct(product.toObject(), true);
 }

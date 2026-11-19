@@ -38,7 +38,7 @@ import {
   SupportTicket,
 } from "../models/engagement.model";
 import { PartnerPayout } from "../models/engagement.model";
-import { createListing, presentProduct, searchProducts, setListingStatus } from "../services/catalog.service";
+import { createListing, presentProduct, searchProducts, setListingStatus, updateListingImages } from "../services/catalog.service";
 import { assertCanAddEmployee } from "../services/entitlement.service";
 import {
   addCartItem,
@@ -105,16 +105,22 @@ api.post(
   asyncHandler(async (req, res) => {
     const body = z
       .object({
-        panel: z.enum(["admin", "partner", "showroom"]),
+        // Optional: without a panel, any panel role (admin, partner or seller) may sign in.
+        panel: z.enum(["admin", "partner", "showroom"]).optional(),
         email: z.string().email(),
         password: z.string().min(6).max(80),
       })
       .parse(req.body);
     const email = body.email.toLowerCase();
     const user = await User.findOne({ email, status: "active" });
-    const role = body.panel === "admin" ? "super_admin" : body.panel === "partner" ? "service_partner" : "business_seller";
-    if (!user?.passwordHash || !verifyPassword(body.password, user.passwordHash) || !user.roles.includes(role)) {
-      throw new AppError(401, "INVALID_LOGIN", "Email or password does not match this panel.");
+    const allowed = body.panel
+      ? [body.panel === "admin" ? "super_admin" : body.panel === "partner" ? "service_partner" : "business_seller"]
+      : ["super_admin", "service_partner", "business_seller"];
+    if (!user?.passwordHash || !verifyPassword(body.password, user.passwordHash)) {
+      throw new AppError(401, "INVALID_LOGIN", "Email or password is incorrect.");
+    }
+    if (!allowed.some((role) => user.roles.includes(role))) {
+      throw new AppError(403, "NO_PANEL_ACCESS", "This account has no seller, partner or admin access. Sign up as a seller or partner first.");
     }
     const token = signDevToken({ uid: user.firebaseUid, email, name: user.displayName });
     sendData(res, { token });
@@ -737,6 +743,11 @@ authed.patch(
     if (body.pricePaise) await notifyPriceAlerts(String(product._id), product.pricePaise);
     sendData(res, presentProduct(product.toObject() as never, true));
   }),
+);
+
+authed.put(
+  "/products/:id/images",
+  asyncHandler(async (req, res) => sendData(res, await updateListingImages(req, req.params.id, req.body))),
 );
 
 authed.post(

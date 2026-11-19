@@ -48,6 +48,8 @@ const clientOrigins = [
   ...(process.env.CLIENT_ORIGIN || "http://localhost:5173").split(","),
   new URL(PUBLISHED_WEB_APP).origin,
   new URL(appUrl).origin,
+  // The admin panel runs on its own port in local development.
+  ...(nodeEnv === "production" ? [] : ["http://localhost:5174"]),
 ]
   .map((origin) => origin.trim().replace(/\/+$/, ""))
   .filter((origin, index, all) => origin && all.indexOf(origin) === index);

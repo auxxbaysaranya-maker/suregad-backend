@@ -3,12 +3,16 @@ import { env } from "../config/env";
 import { logger } from "../config/logger";
 import { seedSystemData } from "./run";
 import { demoPassword, seedDemoData } from "./demo";
+import { ensureDemoGallery } from "./demo-gallery";
 
 async function main() {
   if (!env.mongoUri) throw new Error("MONGODB_URI is required to seed configuration.");
   await connectDb();
-  if (process.argv.includes("--demo")) {
+  if (process.argv.includes("--demo-gallery")) {
+    await ensureDemoGallery();
+  } else if (process.argv.includes("--demo")) {
     await seedDemoData();
+    await ensureDemoGallery();
     logger.info({ password: demoPassword }, "Demo users are ready. Firebase email sign-in uses this password when Firebase Admin is configured. Local sign-in uses the same email.");
   } else {
     await seedSystemData();
