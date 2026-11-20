@@ -35,18 +35,28 @@ function bool(value: string | undefined, fallback = false): boolean {
 
 const nodeEnv = process.env.NODE_ENV || "development";
 
-/** The published SureGad web app (GitHub Pages). Always allowed to call this API. */
-const PUBLISHED_WEB_APP = "https://auxxbaysaranya-maker.github.io/suregad-frontend";
+/** The published SureGad marketplace (custom domain on GitHub Pages). */
+const PUBLISHED_WEB_APP = "https://suregad.in";
+
+/** Published front ends that may always call this API: marketplace, admin panel, and the github.io fallbacks. */
+const PUBLISHED_ORIGINS = [
+  "https://suregad.in",
+  "https://www.suregad.in",
+  "https://dashboard.suregad.in",
+  "https://auxxbaysaranya-maker.github.io",
+];
 
 const isLocal = (value?: string) => !value || /\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(value);
 /** Render sets RENDER_EXTERNAL_URL; prefer it over a value still pointing at localhost. */
 const hostUrl = process.env.RENDER_EXTERNAL_URL;
 
-const appUrl = !isLocal(process.env.APP_URL) ? process.env.APP_URL! : hostUrl ? PUBLISHED_WEB_APP : process.env.APP_URL || "http://localhost:5173";
+/** A deployed API (any host with a public API_PUBLIC_URL, or Render) links to the published marketplace. */
+const deployed = Boolean(hostUrl) || !isLocal(process.env.API_PUBLIC_URL);
+const appUrl = !isLocal(process.env.APP_URL) ? process.env.APP_URL! : deployed ? PUBLISHED_WEB_APP : process.env.APP_URL || "http://localhost:5173";
 
 const clientOrigins = [
   ...(process.env.CLIENT_ORIGIN || "http://localhost:5173").split(","),
-  new URL(PUBLISHED_WEB_APP).origin,
+  ...PUBLISHED_ORIGINS,
   new URL(appUrl).origin,
   // The admin panel runs on its own port in local development.
   ...(nodeEnv === "production" ? [] : ["http://localhost:5174"]),
