@@ -9,7 +9,8 @@ import { createRequire } from "node:module";
 
 const flag = "--use-system-ca";
 const current = process.env.NODE_OPTIONS || "";
-if (!current.split(/\s+/).includes(flag)) {
+// Older Node versions (e.g. 20) don't have the flag; run without it there.
+if (process.allowedNodeEnvironmentFlags.has(flag) && !current.split(/\s+/).includes(flag)) {
   process.env.NODE_OPTIONS = `${current} ${flag}`.trim();
 }
 

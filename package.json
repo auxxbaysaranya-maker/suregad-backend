@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "node scripts/with-system-ca.mjs tsx watch src/server.ts",
-    "build": "esbuild src/server.ts --bundle --platform=node --target=node22 --packages=external --outfile=dist/server.cjs --sourcemap",
-    "start": "node --use-system-ca dist/server.cjs",
+    "build": "esbuild src/server.ts --bundle --platform=node --target=node20 --packages=external --outfile=dist/server.cjs --sourcemap",
+    "start": "node scripts/start.mjs",
     "seed": "node scripts/with-system-ca.mjs tsx src/seed/cli.ts",
     "seed:demo": "node scripts/with-system-ca.mjs tsx src/seed/cli.ts --demo",
     "test": "vitest run",
@@ -53,6 +53,6 @@
     "vitest": "^3.2.4"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=20.12"
   }
 }
