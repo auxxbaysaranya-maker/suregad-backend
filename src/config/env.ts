@@ -54,15 +54,40 @@ const hostUrl = process.env.RENDER_EXTERNAL_URL;
 const deployed = Boolean(hostUrl) || !isLocal(process.env.API_PUBLIC_URL);
 const appUrl = !isLocal(process.env.APP_URL) ? process.env.APP_URL! : deployed ? PUBLISHED_WEB_APP : process.env.APP_URL || "http://localhost:5173";
 
-const clientOrigins = [
-  ...(process.env.CLIENT_ORIGIN || "http://localhost:5173").split(","),
-  ...PUBLISHED_ORIGINS,
-  new URL(appUrl).origin,
-  // The admin panel runs on its own port in local development.
-  ...(nodeEnv === "production" ? [] : ["http://localhost:5174"]),
-]
+/**
+ * Browser origins allowed to call the API (HTTP and Socket.IO).
+ * CORS_ORIGINS in .env is the source of truth: a comma-separated list such as
+ *   https://suregad.in,https://dashboard.suregad.in,http://localhost:5173,http://localhost:5174
+ * Entries may use a leading wildcard for subdomains: https://*.suregad.in
+ * Without CORS_ORIGINS, the legacy CLIENT_ORIGIN plus the published sites and local dev ports are used.
+ */
+const configuredOrigins = (process.env.CORS_ORIGINS || "").trim();
+const clientOrigins = (
+  configuredOrigins
+    ? configuredOrigins.split(",")
+    : [
+        ...(process.env.CLIENT_ORIGIN || "http://localhost:5173").split(","),
+        ...PUBLISHED_ORIGINS,
+        new URL(appUrl).origin,
+        ...(nodeEnv === "production" ? [] : ["http://localhost:5173", "http://localhost:5174"]),
+      ]
+)
   .map((origin) => origin.trim().replace(/\/+$/, ""))
   .filter((origin, index, all) => origin && all.indexOf(origin) === index);
+
+const wildcard = (pattern: string) => {
+  const match = /^(https?):\/\/\*\.(.+)$/.exec(pattern);
+  if (!match) return null;
+  const domain = match[2]!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${match[1]}:\\/\\/([a-z0-9-]+\\.)+${domain}$`, "i");
+};
+const originMatchers = clientOrigins.map((origin) => wildcard(origin) || origin.toLowerCase());
+
+/** True when a request's Origin header is on the allow list. */
+export function isAllowedOrigin(origin: string): boolean {
+  const value = origin.trim().replace(/\/+$/, "").toLowerCase();
+  return originMatchers.some((matcher) => (typeof matcher === "string" ? matcher === value : matcher.test(value)));
+}
 
 export const env = {
   nodeEnv,

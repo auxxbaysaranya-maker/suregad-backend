@@ -4,6 +4,7 @@ import { createApp } from "./app";
 import mongoose from "mongoose";
 import { connectDb } from "./config/db";
 import { env } from "./config/env";
+import { corsOrigin } from "./config/cors";
 import { logger } from "./config/logger";
 import { seedSystemData } from "./seed/run";
 import { startNotificationWorker } from "./services/notification.service";
@@ -32,7 +33,7 @@ async function broadcastPresence(userId: string, online: boolean) {
 async function main() {
   const app = createApp();
   const server = http.createServer(app);
-  const io = new Server(server, { cors: { origin: env.clientOrigins, credentials: true } });
+  const io = new Server(server, { cors: { origin: corsOrigin, credentials: true } });
   io.use(async (socket, next) => {
     try {
       const token = String(socket.handshake.auth?.token || "");
@@ -86,7 +87,7 @@ async function main() {
     expireOffers().catch((error) => logger.error(error));
   }, 60_000);
   server.listen(env.port, () => {
-    logger.info({ port: env.port }, "SureGad API listening");
+    logger.info({ port: env.port, corsOrigins: env.clientOrigins }, "SureGad API listening");
   });
 }
 

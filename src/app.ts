@@ -6,6 +6,7 @@ import rateLimit from "express-rate-limit";
 import mongoSanitize from "express-mongo-sanitize";
 import path from "path";
 import { env } from "./config/env";
+import { corsOrigin } from "./config/cors";
 import { api } from "./routes";
 import { errorHandler, notFoundHandler } from "./middleware/error";
 import { uploadDir } from "./integrations/storage";
@@ -21,8 +22,9 @@ export function createApp() {
   );
   app.use(
     cors({
-      origin: env.clientOrigins,
+      origin: corsOrigin,
       credentials: true,
+      maxAge: 600,
     }),
   );
   app.use(compression());
