@@ -13,7 +13,8 @@
     "lint": "tsc --noEmit --pretty false",
     "seed:demo-gallery": "node scripts/with-system-ca.mjs tsx src/seed/cli.ts --demo-gallery",
     "seed:demo-applicants": "node scripts/with-system-ca.mjs tsx src/seed/cli.ts --demo-applicants",
-    "seed:firebase-demo": "node scripts/with-system-ca.mjs tsx src/seed/cli.ts --firebase-demo"
+    "seed:firebase-demo": "node scripts/with-system-ca.mjs tsx src/seed/cli.ts --firebase-demo",
+    "storage:migrate": "node scripts/with-system-ca.mjs tsx src/seed/cli.ts --migrate-uploads"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.940.0",

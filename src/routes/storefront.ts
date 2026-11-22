@@ -11,6 +11,7 @@ import { User } from "../models/user.model";
 import { mediaUrl } from "../integrations/storage";
 import { presentProduct } from "../services/catalog.service";
 import { audit } from "../services/audit.service";
+import { releaseFiles } from "../services/files.service";
 
 export const storefront = Router();
 
@@ -256,10 +257,18 @@ storefront.patch(
       if (body.tagline !== undefined) business.tagline = body.tagline;
       if (body.about !== undefined) business.description = body.about;
       if (body.hours !== undefined) business.hours = body.hours;
-      if (body.logoKey) business.logoKey = body.logoKey;
-      if (body.bannerKey) business.bannerKey = body.bannerKey;
+      const replaced: (string | undefined)[] = [];
+      if (body.logoKey && body.logoKey !== business.logoKey) {
+        replaced.push(business.logoKey || undefined);
+        business.logoKey = body.logoKey;
+      }
+      if (body.bannerKey && body.bannerKey !== business.bannerKey) {
+        replaced.push(business.bannerKey || undefined);
+        business.bannerKey = body.bannerKey;
+      }
       if (social) business.set("social", social);
       await business.save();
+      await releaseFiles(replaced);
       await audit(req, "storefront.updated", "Business", String(business._id));
       sendData(res, { saved: true });
       return;

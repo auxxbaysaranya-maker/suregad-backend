@@ -11,7 +11,7 @@ import { InspectionRequest } from "../models/inspection.model";
 import { Business } from "../models/profiles.model";
 import { User } from "../models/user.model";
 import { emitToUser, isOnline } from "../realtime/io";
-import { mediaUrl } from "../integrations/storage";
+import { mediaUrl, storedImageUrl } from "../integrations/storage";
 import { audit } from "../services/audit.service";
 import {
   OFFER_HOLD_HOURS,
@@ -41,7 +41,7 @@ function productSummary(product: Record<string, any> | null | undefined) {
     condition: product.condition,
     sellerType: product.sellerType,
     city: product.city,
-    image: image ? image.url || mediaUrl(image.key) : null,
+    image: image ? storedImageUrl(image) : null,
     available: product.status === "active" && product.inventory?.state === "available" && !product.deletedAt,
   };
 }

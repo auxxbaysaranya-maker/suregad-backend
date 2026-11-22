@@ -4,7 +4,8 @@ import { Brand, Category, Product, ProductModel } from "../models/catalog.model"
 import { Business, SellerProfile } from "../models/profiles.model";
 import { AppError, forbidden, notFound } from "../common/errors";
 import { encryptSecret, hashIdentifier, lastDigits, slugify } from "../common/crypto";
-import { mediaUrl } from "../integrations/storage";
+import { mediaUrl, storedImageUrl } from "../integrations/storage";
+import { releaseArchivedListingImages, releaseProductImages } from "./files.service";
 import { assertCanCreateListing, getEntitlements, recordUsage } from "./entitlement.service";
 import type { Request } from "express";
 import { containsText, nearestPage, parseGeoQuery, recordDistanceKm, withinRadius } from "./geo.service";
@@ -14,7 +15,7 @@ export const activePublic = { status: "active", deletedAt: null, "inventory.stat
 export function presentProduct(product: Record<string, unknown>, detailed = false) {
   const images = ((product.images as { key?: string; url?: string; sort?: number }[]) || []).map((image) => ({
     key: image.key,
-    url: image.url || mediaUrl(image.key),
+    url: storedImageUrl(image),
     sort: image.sort,
   }));
   const inspection = (product.inspection || {}) as {
@@ -267,7 +268,9 @@ export async function setListingStatus(productId: string, status: string, reason
     }
   }
   await product.save();
-  return presentProduct(product.toObject(), true);
+  const result = presentProduct(product.toObject(), true);
+  if (status === "archived") await releaseArchivedListingImages(String(product._id));
+  return result;
 }
 
 export async function listModels(categorySlug?: string, brandSlug?: string) {
@@ -307,9 +310,10 @@ export async function updateListingImages(req: Request, productId: string, body:
   const userId = String(req.user!._id);
   const admin = Boolean(req.permissions?.has("*"));
   if (String(product.sellerUserId) !== userId && !admin) throw forbidden();
-  if (product.inventory?.state === "sold") throw new AppError(409, "SOLD", "Sold listings cannot be edited.");
+  // Showroom listings track stock per unit: "sold" there only means no unit is available right now.
+  if (product.inventory?.state === "sold" && !product.stockTracked) throw new AppError(409, "SOLD", "Sold listings cannot be edited.");
   const unique = [...new Set(imageKeys)];
-  const existing = new Map((product.images || []).map((image) => [image.key || "", image.url || mediaUrl(image.key) || ""]));
+  const existing = new Map((product.images || []).map((image) => [image.key || "", storedImageUrl(image) || ""]));
   if (!admin) assertOwnImageKeys(unique, userId, new Set(existing.keys()));
   const entitlements = await getEntitlements({
     userId: String(product.sellerUserId),
@@ -325,5 +329,7 @@ export async function updateListingImages(req: Request, productId: string, body:
   );
   if (product.status === "active" && !admin) product.status = "pending_review";
   await product.save();
+  // Photos taken off the listing are deleted from storage (unless another listing still uses them).
+  await releaseProductImages([...existing.keys()].filter((key) => !unique.includes(key)));
   return presentProduct(product.toObject(), true);
 }

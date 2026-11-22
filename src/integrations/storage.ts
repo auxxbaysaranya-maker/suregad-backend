@@ -1,4 +1,4 @@
-import { PutObjectCommand, S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, PutObjectCommand, S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { v2 as cloudinary } from "cloudinary";
 import fs from "fs/promises";
@@ -6,6 +6,7 @@ import path from "path";
 import { env } from "../config/env";
 import { AppError } from "../common/errors";
 import { randomId } from "../common/crypto";
+import { logger } from "../config/logger";
 
 const PUBLIC_PURPOSES = new Set(["product_image", "product_video", "business_logo", "business_banner", "avatar", "chat_image"]);
 const PRIVATE_PURPOSES = new Set([
@@ -54,6 +55,37 @@ function cloudinaryClient() {
   return cloudinary;
 }
 
+const IMAGE_EXT = new Set(["jpg", "jpeg", "png", "webp", "gif", "avif"]);
+const VIDEO_EXT = new Set(["mp4", "webm", "mov"]);
+
+/**
+ * How a storage key maps onto Cloudinary. Keys look like "public/product_image/<user>/<id>.jpg" and are
+ * the stable identifier saved in MongoDB (ownership checks rely on the path). In Cloudinary:
+ *  - images and videos: public_id = key without the extension (Cloudinary adds the format on delivery);
+ *  - documents (PDF): "raw" resource whose public_id keeps the extension;
+ *  - private/... keys use the "authenticated" delivery type (signed URLs only), public/... use "upload".
+ * Keys without an extension (seeded remote images) are images.
+ */
+export function cloudinaryAsset(key: string) {
+  const match = /.([a-z0-9]{2,5})$/i.exec(key);
+  const ext = match?.[1]?.toLowerCase() || "";
+  const resourceType: "image" | "video" | "raw" = !ext || IMAGE_EXT.has(ext) ? "image" : VIDEO_EXT.has(ext) ? "video" : "raw";
+  const publicId = resourceType === "raw" || !match ? key : key.slice(0, -match[0].length);
+  const deliveryType: "authenticated" | "upload" = key.startsWith("private/") ? "authenticated" : "upload";
+  return { publicId, resourceType, deliveryType, format: resourceType === "raw" ? undefined : ext || undefined };
+}
+
+function cloudinaryUrl(key: string, signed: boolean) {
+  const asset = cloudinaryAsset(key);
+  return cloudinaryClient().url(asset.publicId, {
+    secure: true,
+    resource_type: asset.resourceType,
+    type: asset.deliveryType,
+    ...(asset.format ? { format: asset.format } : {}),
+    ...(signed || asset.deliveryType === "authenticated" ? { sign_url: true } : {}),
+  });
+}
+
 function client(): S3Client {
   return new S3Client({
     region: env.s3.region,
@@ -99,9 +131,8 @@ export async function signUpload(input: {
   if (mode === "cloudinary") {
     const client = cloudinaryClient();
     const timestamp = Math.round(Date.now() / 1000);
-    const resourceType = input.contentType.startsWith("video/") ? "video" : input.contentType === "application/pdf" ? "raw" : "image";
-    const deliveryType = visibility === "private" ? "authenticated" : "upload";
-    const params = { timestamp, public_id: key, type: deliveryType };
+    const { publicId, resourceType, deliveryType } = cloudinaryAsset(key);
+    const params = { timestamp, public_id: publicId, type: deliveryType };
     const signature = client.utils.api_sign_request(params, env.cloudinary.apiSecret);
     return {
       key,
@@ -112,10 +143,10 @@ export async function signUpload(input: {
         api_key: env.cloudinary.apiKey,
         timestamp: String(timestamp),
         signature,
-        public_id: key,
+        public_id: publicId,
         type: deliveryType,
       },
-      publicUrl: visibility === "public" ? client.url(key, { secure: true, resource_type: resourceType }) : undefined,
+      publicUrl: visibility === "public" ? cloudinaryUrl(key, false) : undefined,
     };
   }
   if (mode === "s3") {
@@ -155,7 +186,7 @@ export async function readLocalUpload(key: string): Promise<Buffer> {
 export async function signedDownload(key: string): Promise<string> {
   const mode = storageMode();
   if (mode === "cloudinary") {
-    return cloudinaryClient().url(key, { secure: true, sign_url: true, type: "authenticated" });
+    return cloudinaryUrl(key, true);
   }
   if (mode !== "s3") return "";
   const command = new GetObjectCommand({ Bucket: env.s3.bucket, Key: key });
@@ -165,9 +196,7 @@ export async function signedDownload(key: string): Promise<string> {
 export function mediaUrl(key?: string | null): string | undefined {
   if (!key) return undefined;
   if (key.startsWith("http")) return key;
-  if (storageMode() === "cloudinary") {
-    return cloudinaryClient().url(key, { secure: true });
-  }
+  if (storageMode() === "cloudinary") return cloudinaryUrl(key, false);
   if (storageMode() === "s3" && env.s3.publicBaseUrl && key.startsWith("public/")) {
     return `${env.s3.publicBaseUrl.replace(/\/$/, "")}/${key}`;
   }
@@ -186,13 +215,12 @@ export async function uploadRemoteImage(sourceUrl: string, publicId: string): Pr
 /** Store a file generated on the server (seeds, generated reports) under a storage key. */
 export async function storeServerFile(key: string, bytes: Buffer, contentType: string): Promise<void> {
   const mode = storageMode();
-  const visibility = key.startsWith("private/") ? "private" : "public";
   if (mode === "cloudinary") {
-    const resourceType = contentType.startsWith("video/") ? "video" : contentType === "application/pdf" ? "raw" : "image";
+    const asset = cloudinaryAsset(key);
     await cloudinaryClient().uploader.upload(`data:${contentType};base64,${bytes.toString("base64")}`, {
-      public_id: key,
-      type: visibility === "private" ? "authenticated" : "upload",
-      resource_type: resourceType,
+      public_id: asset.publicId,
+      type: asset.deliveryType,
+      resource_type: asset.resourceType,
       overwrite: true,
     });
     return;
@@ -202,4 +230,58 @@ export async function storeServerFile(key: string, bytes: Buffer, contentType: s
     return;
   }
   await saveLocalUpload(key, bytes);
+}
+
+/** Whether a stored file exists (used before attaching an upload to a record). */
+export async function storedFileExists(key: string): Promise<boolean> {
+  const mode = storageMode();
+  try {
+    if (mode === "cloudinary") {
+      const asset = cloudinaryAsset(key);
+      await cloudinaryClient().api.resource(asset.publicId, { resource_type: asset.resourceType, type: asset.deliveryType });
+      return true;
+    }
+    if (mode === "local") {
+      await fs.access(path.join(uploadDir(), key));
+      return true;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Permanently removes stored files. Best effort: a storage failure is logged and never fails the
+ * request that removed the file from its record. Remote URLs (seed images) are skipped.
+ * Callers must check the key is no longer referenced anywhere (see files.service).
+ */
+export async function deleteStoredFiles(keys: (string | null | undefined)[]): Promise<number> {
+  const mode = storageMode();
+  let removed = 0;
+  for (const key of new Set(keys.filter((value): value is string => Boolean(value)))) {
+    if (/^https?:/i.test(key) || key.includes("..")) continue;
+    try {
+      if (mode === "cloudinary") {
+        const asset = cloudinaryAsset(key);
+        const result = (await cloudinaryClient().uploader.destroy(asset.publicId, { resource_type: asset.resourceType, type: asset.deliveryType, invalidate: true })) as { result?: string };
+        if (result.result === "ok") removed += 1;
+      } else if (mode === "s3") {
+        await client().send(new DeleteObjectCommand({ Bucket: env.s3.bucket, Key: key }));
+        removed += 1;
+      } else if (mode === "local") {
+        await fs.rm(path.join(uploadDir(), key), { force: true });
+        removed += 1;
+      }
+    } catch (error) {
+      logger.warn({ key, reason: (error as Error).message }, "Stored file could not be deleted");
+    }
+  }
+  return removed;
+}
+
+/** Delivery URL for a stored image: built from the key so it follows the active storage (Cloudinary). */
+export function storedImageUrl(image: { key?: string | null; url?: string | null }): string | undefined {
+  if (image.key && !/^https?:/i.test(image.key)) return mediaUrl(image.key);
+  return image.url || mediaUrl(image.key);
 }

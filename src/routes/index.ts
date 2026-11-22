@@ -18,6 +18,8 @@ import { claimReferral, deviceHistory, ensureReferralCode, notifyPriceAlerts } f
 import { NewsletterSignup, PriceAlert, Referral, SellerSettlement } from "../models/engagement.model";
 import { getPaymentProvider, mockPaymentSignature } from "../integrations/payments";
 import { readLocalUpload, saveLocalUpload, signUpload, signedDownload } from "../integrations/storage";
+import { releaseFiles } from "../services/files.service";
+import { assertOwnPrivateKey, assertOwnPublicKey } from "../services/showroom.service";
 import { User } from "../models/user.model";
 import { Business, BusinessEmployee, BuyerProfile, PartnerProfile, SellerProfile } from "../models/profiles.model";
 import { Brand, Category, Product, ProductModel } from "../models/catalog.model";
@@ -446,6 +448,9 @@ api.post(
         documentKeys: z.array(z.string()).default([]),
       })
       .parse(req.body);
+    const ownerId = String(req.user!._id);
+    for (const key of [body.logoKey, body.bannerKey]) if (key) assertOwnPublicKey(key, ownerId, ["business_logo", "business_banner"]);
+    for (const key of body.documentKeys) assertOwnPrivateKey(key, ownerId, "business_document");
     const user = await User.findById(req.user!._id);
     if (!user) throw notFound();
     if (!user.roles.includes("business_seller")) user.roles.push("business_seller");
@@ -492,6 +497,12 @@ api.post(
         agreementAccepted: z.literal(true),
       })
       .parse(req.body);
+    for (const doc of body.documentKeys) {
+      if (doc.key.includes("..") || !/^private\/(partner_document|business_document)\//.test(doc.key) || !doc.key.includes(`/${String(req.user!._id)}/`)) {
+        throw new AppError(400, "INVALID_FILE", "Upload the document again from this account.");
+      }
+    }
+    const previousDocs = ((await PartnerProfile.findOne({ userId: req.user!._id }).select("documents").lean())?.documents || []) as { key?: string }[];
     const user = await User.findById(req.user!._id);
     if (!user) throw notFound();
     if (!user.roles.includes("service_partner")) user.roles.push("service_partner");
@@ -527,6 +538,9 @@ api.post(
       },
       { upsert: true, new: true },
     );
+    // Documents left out of a re-submission are deleted from storage.
+    const kept = new Set(body.documentKeys.map((doc) => doc.key));
+    await releaseFiles(previousDocs.map((doc) => doc.key).filter((key) => key && !kept.has(key)));
     await audit(req, "partner.submitted", "PartnerProfile", String(partner._id));
     sendData(res, { id: partner._id, verificationStatus: partner.verificationStatus });
   }),

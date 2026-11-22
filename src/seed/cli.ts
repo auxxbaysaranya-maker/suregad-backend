@@ -6,11 +6,14 @@ import { demoPassword, seedDemoData } from "./demo";
 import { ensureDemoGallery } from "./demo-gallery";
 import { ensureDemoApplicants } from "./demo-applicants";
 import { ensureFirebaseDemoLogins } from "./firebase-demo";
+import { migrateLocalUploads } from "./migrate-uploads";
 
 async function main() {
   if (!env.mongoUri) throw new Error("MONGODB_URI is required to seed configuration.");
   await connectDb();
-  if (process.argv.includes("--firebase-demo")) {
+  if (process.argv.includes("--migrate-uploads")) {
+    await migrateLocalUploads();
+  } else if (process.argv.includes("--firebase-demo")) {
     await ensureFirebaseDemoLogins();
   } else if (process.argv.includes("--demo-applicants")) {
     await ensureDemoApplicants({ reset: process.argv.includes("--reset") });

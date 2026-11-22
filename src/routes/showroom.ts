@@ -66,6 +66,7 @@ import {
   updateDeliveryDetails,
 } from "../services/showroom-orders.service";
 import { signedDownload, readLocalUpload } from "../integrations/storage";
+import { releaseFiles } from "../services/files.service";
 
 export const showroom = Router();
 const seller = Router();
@@ -159,8 +160,10 @@ showroom.delete(
     const doc = business.documents.id(req.params.docId);
     if (!doc) throw notFound("Document not found.");
     if (doc.status === "approved") throw new AppError(409, "DOCUMENT_APPROVED", "Approved documents can't be removed.");
+    const removedKey = doc.key;
     doc.deleteOne();
     await business.save();
+    await releaseFiles([removedKey]);
     sendData(res, presentShowroom(business));
   }),
 );
@@ -1685,13 +1688,21 @@ seller.patch(
     const business = biz(req);
     for (const key of [body.logoKey, body.bannerKey]) if (key) assertOwnPublicKey(key, String(req.user!._id), ["business_logo", "business_banner"]);
     for (const key of ["description", "tagline", "hours", "phone", "email"] as const) if (body[key] !== undefined) business.set(key, body[key]);
-    if (body.logoKey !== undefined) business.logoKey = body.logoKey || undefined;
-    if (body.bannerKey !== undefined) business.bannerKey = body.bannerKey || undefined;
+    const replaced: (string | undefined)[] = [];
+    if (body.logoKey !== undefined && body.logoKey !== business.logoKey) {
+      replaced.push(business.logoKey || undefined);
+      business.logoKey = body.logoKey || undefined;
+    }
+    if (body.bannerKey !== undefined && body.bannerKey !== business.bannerKey) {
+      replaced.push(business.bannerKey || undefined);
+      business.bannerKey = body.bannerKey || undefined;
+    }
     for (const group of ["social", "profile", "policies", "owner"] as const) {
       const value = body[group];
       if (value) for (const [key, entry] of Object.entries(value)) business.set(`${group}.${key}`, entry);
     }
     await business.save();
+    await releaseFiles(replaced);
     await audit(req, "showroom.profile_updated", "Business", String(business._id), { fields: Object.keys(body) });
     sendData(res, presentShowroom(business));
   }),
