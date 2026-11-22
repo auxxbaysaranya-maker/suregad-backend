@@ -65,6 +65,8 @@ const sellerProfileSchema = new Schema(
   { timestamps: true },
 );
 
+sellerProfileSchema.index({ location: "2dsphere" });
+
 const buyerProfileSchema = new Schema(
   {
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true, unique: true },

@@ -104,6 +104,8 @@ export const env = {
     .map((email) => email.trim().toLowerCase())
     .filter(Boolean),
   dataEncryptionKey: process.env.DATA_ENCRYPTION_KEY || "",
+  /** Google Maps Platform (Places API New + Geocoding). Server-only; never sent to browsers. */
+  googleMapsApiKey: (process.env.GOOGLE_MAPS_API_KEY || "").trim(),
   allowDevAuth: !bool(String(nodeEnv === "production")) && bool(process.env.ALLOW_DEV_AUTH),
   devAuthSecret: process.env.DEV_AUTH_SECRET || "",
   firebase: {
@@ -201,10 +203,16 @@ export function integrationStatus() {
             ? "not_configured"
             : "local",
     webPush: Boolean(env.vapid.publicKey && env.vapid.privateKey),
+    googleMaps: Boolean(env.googleMapsApiKey),
     ai: Boolean(env.ai.apiKey),
     email: Boolean(env.smtp.host),
     sms: Boolean(env.sms.provider && env.sms.apiKey),
     whatsapp: Boolean(env.whatsapp.provider && env.whatsapp.apiKey),
     encryption: Boolean(env.dataEncryptionKey && env.dataEncryptionKey.length >= 32),
   };
+}
+
+// Google API keys start with "AIza" and are 39 characters. Warn about an obviously wrong value without printing it.
+if (env.googleMapsApiKey && !/^AIza[0-9A-Za-z_-]{35}$/.test(env.googleMapsApiKey) && !env.isTest) {
+  console.warn("GOOGLE_MAPS_API_KEY does not look like a Google API key (expected 39 characters starting with AIza).");
 }

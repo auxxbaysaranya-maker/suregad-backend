@@ -41,6 +41,7 @@ import {
   SupportTicket,
 } from "../models/engagement.model";
 import { PartnerPayout } from "../models/engagement.model";
+import { parseGeoQuery, recordDistanceKm, withinRadius } from "../services/geo.service";
 import { activePublic, createListing, presentProduct, searchProducts, setListingStatus, updateListingImages } from "../services/catalog.service";
 import { assertCanAddEmployee } from "../services/entitlement.service";
 import {
@@ -69,6 +70,8 @@ import { AIJob } from "../models/engagement.model";
 import { devAuth } from "./dev-auth";
 import { chat } from "./chat";
 import { storefront } from "./storefront";
+import { discovery } from "./discovery";
+import { geo } from "./geo";
 
 export const api = Router();
 
@@ -594,13 +597,16 @@ api.get(
     const seller = await SellerProfile.findOne({ userId: product.sellerUserId }).lean();
     const business = product.businessId ? await Business.findById(product.businessId).lean() : null;
     const reviews = await Review.find({ targetType: "product", targetId: product._id, status: "published" }).sort({ createdAt: -1 }).limit(20).lean();
-    const similar = await Product.find({
-      _id: { $ne: product._id },
-      categorySlug: product.categorySlug,
-      ...activePublic,
-    }).sort({ createdAt: -1 }).limit(4).lean();
+    const geo = parseGeoQuery(req.query as Record<string, unknown>);
+    const similarFilter = { _id: { $ne: product._id }, categorySlug: product.categorySlug, ...activePublic };
+    // Similar devices near the shopper first, then anywhere.
+    let similar = geo ? await Product.find({ ...similarFilter, location: withinRadius(geo) }).sort({ createdAt: -1 }).limit(4).lean() : [];
+    if (similar.length < 4) {
+      const more = await Product.find({ ...similarFilter, _id: { $nin: [product._id, ...similar.map((item) => item._id)] } }).sort({ createdAt: -1 }).limit(4 - similar.length).lean();
+      similar = [...similar, ...more];
+    }
     sendData(res, {
-      product: presentProduct(product as never, true),
+      product: { ...presentProduct(product as never, true), distanceKm: recordDistanceKm(geo, product.location) },
       seller: seller
         ? { slug: seller.slug, displayName: seller.displayName, city: seller.city, verified: seller.verified, memberSince: seller.createdAt }
         : null,
@@ -608,7 +614,7 @@ api.get(
         ? { slug: business.slug, name: business.name, verified: business.verificationStatus === "approved", city: business.address?.city, hours: business.hours }
         : null,
       reviews,
-      similar: similar.map((item) => presentProduct(item as never)),
+      similar: similar.map((item) => ({ ...presentProduct(item as never), distanceKm: recordDistanceKm(geo, item.location) })),
       history: await deviceHistory(String(product._id)),
     });
   }),
@@ -648,34 +654,61 @@ api.post(
 
 api.get(
   "/marketplace/home",
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
     const live = activePublic;
+    const geo = parseGeoQuery(req.query as Record<string, unknown>);
     const settings = await PlatformSetting.findOne({ key: "platform" }).lean();
-    const [featured, recent, inspected, refurbished, laptops, categories, brands, showrooms, sellers, reviews] = await Promise.all([
-      Product.find({ ...live, featuredUntil: { $gt: new Date() } }).sort({ featuredUntil: -1 }).limit(8).lean(),
-      Product.find(live).sort({ createdAt: -1 }).limit(8).lean(),
-      Product.find({ ...live, "inspection.published": true }).sort({ updatedAt: -1 }).limit(8).lean(),
-      Product.find({ ...live, sellerType: "business" }).sort({ createdAt: -1 }).limit(8).lean(),
-      Product.find({ ...live, categorySlug: "laptops" }).sort({ createdAt: -1 }).limit(4).lean(),
+    /** Prefer records within the shopper's radius; fall back to everywhere so no section is empty. */
+    async function nearFirst<T>(run: (extra: Record<string, unknown>) => Promise<T[]>): Promise<{ items: T[]; near: boolean }> {
+      if (geo) {
+        const near = await run({ location: withinRadius(geo) });
+        if (near.length) return { items: near, near: true };
+      }
+      return { items: await run({}), near: false };
+    }
+    const [featuredSet, recentSet, inspectedSet, refurbishedSet, laptopsSet, categories, brands, showroomSet, sellerSet, reviews] = await Promise.all([
+      nearFirst((extra) => Product.find({ ...live, ...extra, featuredUntil: { $gt: new Date() } }).sort({ featuredUntil: -1 }).limit(8).lean()),
+      nearFirst((extra) => Product.find({ ...live, ...extra }).sort({ createdAt: -1 }).limit(8).lean()),
+      nearFirst((extra) => Product.find({ ...live, ...extra, "inspection.published": true }).sort({ updatedAt: -1 }).limit(8).lean()),
+      nearFirst((extra) => Product.find({ ...live, ...extra, sellerType: "business" }).sort({ createdAt: -1 }).limit(8).lean()),
+      nearFirst((extra) => Product.find({ ...live, ...extra, categorySlug: "laptops" }).sort({ createdAt: -1 }).limit(4).lean()),
       Category.find({ active: true }).sort({ sort: 1 }).select("slug name").lean(),
       Brand.find({ active: true, popular: true }).select("slug name").lean(),
-      Business.find({ verificationStatus: "approved", deletedAt: null }).sort({ sponsoredUntil: -1, createdAt: -1 }).limit(6).lean(),
-      SellerProfile.find({ deletedAt: null }).sort({ verified: -1 }).limit(6).select("slug displayName city verified").lean(),
+      nearFirst((extra) => Business.find({ verificationStatus: "approved", deletedAt: null, ...extra }).sort({ sponsoredUntil: -1, createdAt: -1 }).limit(6).lean()),
+      nearFirst((extra) => SellerProfile.find({ deletedAt: null, ...extra }).sort({ verified: -1 }).limit(6).select("slug displayName city verified location").lean()),
       Review.find({ status: "published", targetType: "product" }).sort({ createdAt: -1 }).limit(4).lean(),
     ]);
+    const featured = featuredSet.items;
+    const recent = recentSet.items;
+    const showrooms = showroomSet.items;
+    const sellers = sellerSet.items;
+    const withDistance = (item: Record<string, unknown>) => ({ ...presentProduct(item as never), distanceKm: recordDistanceKm(geo, item.location) });
     const reviewProducts = await Product.find({ _id: { $in: reviews.map((review) => review.targetId) } }).select("title slug").lean();
     const reviewAuthors = await User.find({ _id: { $in: reviews.map((review) => review.authorId) } }).select("displayName").lean();
     sendData(res, {
       cms: settings?.value?.homepage || {},
       categories,
       brands,
-      trending: (featured.length ? featured : recent).map((item) => presentProduct(item as never)),
-      fresh: recent.map((item) => presentProduct(item as never)),
-      inspected: inspected.map((item) => presentProduct(item as never)),
-      refurbished: refurbished.map((item) => presentProduct(item as never)),
-      laptops: laptops.map((item) => presentProduct(item as never)),
-      featured: featured.map((item) => presentProduct(item as never)),
-      recent: recent.map((item) => presentProduct(item as never)),
+      trending: (featured.length ? featured : recent).map(withDistance),
+      fresh: recent.map(withDistance),
+      inspected: inspectedSet.items.map(withDistance),
+      refurbished: refurbishedSet.items.map(withDistance),
+      laptops: laptopsSet.items.map(withDistance),
+      featured: featured.map(withDistance),
+      recent: recent.map(withDistance),
+      /** Which sections are genuinely near the shopper (false = showing everywhere). */
+      nearby: geo
+        ? {
+            radiusKm: geo.radiusKm,
+            trending: featured.length ? featuredSet.near : recentSet.near,
+            fresh: recentSet.near,
+            inspected: inspectedSet.near,
+            refurbished: refurbishedSet.near,
+            laptops: laptopsSet.near,
+            showrooms: showroomSet.near,
+            sellers: sellerSet.near,
+          }
+        : null,
       showrooms: showrooms.map((store) => ({
         id: store._id,
         slug: store.slug,
@@ -684,6 +717,7 @@ api.get(
         description: store.description,
         verified: store.verificationStatus === "approved",
         sponsored: Boolean(store.sponsoredUntil && store.sponsoredUntil > new Date()),
+        distanceKm: recordDistanceKm(geo, store.location),
       })),
       sellers: sellers.map((seller) => ({
         slug: seller.slug,
@@ -691,6 +725,7 @@ api.get(
         city: seller.city,
         verified: seller.verified,
         type: "individual",
+        distanceKm: recordDistanceKm(geo, seller.location),
       })),
       reviews: reviews.map((review) => ({
         rating: review.rating,
@@ -1739,6 +1774,8 @@ api.post(
 
 api.use("/chat", chat);
 api.use(storefront);
+api.use(discovery);
+api.use(geo);
 api.use(showroom);
 api.use(support);
 api.use(authed);

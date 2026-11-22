@@ -7,6 +7,7 @@ import { encryptSecret, hashIdentifier, lastDigits, slugify } from "../common/cr
 import { mediaUrl } from "../integrations/storage";
 import { assertCanCreateListing, getEntitlements, recordUsage } from "./entitlement.service";
 import type { Request } from "express";
+import { containsText, nearestPage, parseGeoQuery, recordDistanceKm, withinRadius } from "./geo.service";
 
 export const activePublic = { status: "active", deletedAt: null, "inventory.state": { $ne: "sold" }, published: { $ne: false }, businessHold: { $ne: true } };
 
@@ -184,12 +185,8 @@ export async function searchProducts(query: Record<string, unknown>) {
   if (query.sellerType) filter.sellerType = String(query.sellerType);
   if (query.city) filter.city = new RegExp(`^${String(query.city).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
   if (query.district) filter.district = new RegExp(String(query.district), "i");
-  const lat = Number(query.lat);
-  const lng = Number(query.lng);
-  if (query.lat !== undefined && query.lng !== undefined && Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
-    const radiusKm = Math.min(500, Math.max(1, Number(query.radiusKm) || 50));
-    filter.location = { $geoWithin: { $centerSphere: [[lng, lat], radiusKm / 6378.1] } };
-  }
+  // Discovery point from the shopper; distances are measured to each listing's own location.
+  const geo = parseGeoQuery(query);
   if (query.minPrice || query.maxPrice) {
     filter.pricePaise = {
       ...(query.minPrice ? { $gte: Number(query.minPrice) * 100 } : {}),
@@ -222,14 +219,30 @@ export async function searchProducts(query: Record<string, unknown>) {
     views: { "stats.views": -1 },
     recommended: { featuredUntil: -1, createdAt: -1 },
   };
-  const sort = sortMap[String(query.sort || "recommended")] || sortMap.recommended;
+  // Nearest first is the default near a location (unless a keyword asks for relevance).
+  const sortKey = String(query.sort || (geo && !query.q ? "distance" : "recommended"));
+  if (geo && sortKey === "distance") {
+    // $geoNear can't be combined with $text, so keywords become a contains-match here.
+    const { $text, ...nearFilter } = filter as Record<string, unknown> & { $text?: unknown };
+    if ($text && query.q) {
+      const text = containsText(String(query.q));
+      nearFilter.$or = [{ title: text }, { "specs.brand": text }, { "specs.model": text }, { description: text }];
+    }
+    const { items, total } = await nearestPage<Record<string, unknown>>(Product, geo, nearFilter, { skip: (page - 1) * limit, limit });
+    return {
+      items: items.map((item) => ({ ...presentProduct(item), distanceKm: recordDistanceKm(geo, item.location) })),
+      meta: { page, limit, total, hasMore: page * limit < total, radiusKm: geo.radiusKm, sort: "distance" },
+    };
+  }
+  if (geo) filter.location = withinRadius(geo);
+  const sort = sortMap[sortKey] || sortMap.recommended;
   const [items, total] = await Promise.all([
     Product.find(filter).sort(sort).skip((page - 1) * limit).limit(limit).lean(),
     Product.countDocuments(filter),
   ]);
   return {
-    items: items.map((item) => presentProduct(item as Record<string, unknown>)),
-    meta: { page, limit, total, hasMore: page * limit < total },
+    items: items.map((item) => ({ ...presentProduct(item as Record<string, unknown>), distanceKm: recordDistanceKm(geo, item.location) })),
+    meta: { page, limit, total, hasMore: page * limit < total, ...(geo ? { radiusKm: geo.radiusKm } : {}), sort: sortMap[sortKey] ? sortKey : "recommended" },
   };
 }
 

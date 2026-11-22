@@ -265,8 +265,13 @@ seller.get(
 /** ================= Products ================= */
 
 function presentListing(product: Record<string, any>) {
+  const coordinates = product.location?.coordinates as number[] | undefined;
   return {
     ...presentProduct(product, true),
+    // The seller's own exact pickup point (the public listing only shows a rounded area).
+    pickup: coordinates?.length === 2
+      ? { lat: coordinates[1], lng: coordinates[0], city: product.city || "", district: product.district || "", state: product.state || "Kerala", pincode: product.pincode || "" }
+      : null,
     status: product.status,
     published: product.published !== false,
     onHold: product.businessHold === true,
@@ -343,7 +348,33 @@ const listingExtrasSchema = z.object({
   lowStockThreshold: z.number().int().min(0).max(1000).optional(),
 });
 
+/**
+ * Optional pickup point for one listing, chosen on a map by the seller. When omitted the listing
+ * uses the showroom address. It is never derived from anyone's device position.
+ */
+const pickupSchema = z.object({
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  city: z.string().trim().min(2).max(80),
+  district: z.string().trim().min(2).max(80),
+  state: z.string().trim().min(2).max(80).default("Kerala"),
+  pincode: z.string().trim().regex(/^[1-9][0-9]{5}$/, "Enter a 6-digit PIN code."),
+});
+
+/** Listing location: the pickup point if given, else the showroom address. */
+function listingLocation(business: ReturnType<typeof biz>, pickup?: z.infer<typeof pickupSchema> | null) {
+  if (pickup) {
+    return { city: pickup.city, district: pickup.district, state: pickup.state, pincode: pickup.pincode, coordinates: { lat: pickup.lat, lng: pickup.lng } };
+  }
+  if (!business.address?.city || !business.address?.district || !business.address?.pincode) {
+    throw new AppError(409, "ADDRESS_INCOMPLETE", "Your showroom address needs a city, district and PIN code before listing. Set a pickup location for this listing or contact support.");
+  }
+  const coordinates = business.location?.coordinates?.length === 2 ? { lng: business.location.coordinates[0]!, lat: business.location.coordinates[1]! } : undefined;
+  return { city: business.address.city, district: business.address.district, state: business.address.state || "Kerala", pincode: business.address.pincode, coordinates };
+}
+
 const createSchema = listingExtrasSchema.extend({
+  pickup: pickupSchema.nullable().optional(),
   categorySlug: z.enum(["smartphones", "laptops"]),
   title: z.string().trim().min(4).max(140),
   description: z.string().trim().min(10).max(8000),
@@ -372,10 +403,7 @@ async function createShowroomListing(req: Request, body: unknown) {
     }
     await assertUniqueIdentifiers({ imei: unit.imei, serial: unit.serial });
   }
-  if (!business.address?.city || !business.address?.district || !business.address?.pincode) {
-    throw new AppError(409, "ADDRESS_INCOMPLETE", "Your showroom address needs a city, district and PIN code before listing. Contact support to update it.");
-  }
-  const coordinates = business.location?.coordinates?.length === 2 ? { lng: business.location.coordinates[0]!, lat: business.location.coordinates[1]! } : undefined;
+  const location = listingLocation(business, input.pickup);
   const listing = await createListing(req, {
     categorySlug: input.categorySlug,
     sellerType: "business",
@@ -386,13 +414,7 @@ async function createShowroomListing(req: Request, body: unknown) {
     pricePaise: input.pricePaise,
     specs: input.specs,
     imageKeys: input.imageKeys,
-    location: {
-      city: business.address.city,
-      district: business.address.district,
-      state: business.address.state || "Kerala",
-      pincode: business.address.pincode,
-      coordinates,
-    },
+    location,
     submit: input.submit,
   });
   const listingCode = await nextCode("LIST");
@@ -525,6 +547,8 @@ const editSchema = listingExtrasSchema.partial().extend({
   pricePaise: z.number().int().positive().max(50_000_000).optional(),
   specs: z.record(z.unknown()).optional(),
   lowStockThreshold: z.number().int().min(0).max(1000).nullable().optional(),
+  /** A new pickup point, or null to go back to the showroom address. */
+  pickup: pickupSchema.nullable().optional(),
 });
 
 seller.patch(
@@ -548,6 +572,11 @@ seller.patch(
       if (input[key] !== undefined) product.set(key, input[key]);
     }
     if (input.lowStockThreshold !== undefined) product.lowStockThreshold = input.lowStockThreshold ?? undefined;
+    if (input.pickup !== undefined) {
+      const location = listingLocation(biz(req), input.pickup);
+      product.set({ city: location.city, district: location.district, state: location.state, pincode: location.pincode });
+      product.set("location", location.coordinates ? { type: "Point", coordinates: [location.coordinates.lng, location.coordinates.lat] } : undefined);
+    }
     if (product.deliveryAvailable === false && product.pickupAvailable === false) throw new AppError(400, "NO_FULFILMENT", "Offer delivery, pickup or both.");
     let priceDrop = false;
     if (input.pricePaise !== undefined && input.pricePaise !== product.pricePaise) {

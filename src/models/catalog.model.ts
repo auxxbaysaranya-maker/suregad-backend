@@ -54,9 +54,13 @@ const productSchema = new Schema(
     district: String,
     state: { type: String, default: "Kerala" },
     pincode: String,
+    /**
+     * Where the device is (pickup point or showroom), set by the seller — never from a shopper's position.
+     * No defaults: a half-empty point breaks the 2dsphere index.
+     */
     location: {
-      type: { type: String, enum: ["Point"], default: "Point" },
-      coordinates: { type: [Number] },
+      type: { type: String, enum: ["Point"] },
+      coordinates: { type: [Number], default: undefined },
     },
     status: {
       type: String,
@@ -126,11 +130,12 @@ productSchema.index({ title: "text", description: "text" });
 productSchema.index({ location: "2dsphere" });
 productSchema.index(
   { "identifier.imeiHash": 1 },
-  { unique: true, sparse: true, partialFilterExpression: { deletedAt: null } },
+  // MongoDB rejects sparse + partial together; the partial filter alone skips listings without an IMEI.
+  { unique: true, partialFilterExpression: { "identifier.imeiHash": { $type: "string" }, deletedAt: null } },
 );
 productSchema.index(
   { "identifier.serialHash": 1 },
-  { unique: true, sparse: true, partialFilterExpression: { deletedAt: null } },
+  { unique: true, partialFilterExpression: { "identifier.serialHash": { $type: "string" }, deletedAt: null } },
 );
 productSchema.index({ status: 1, createdAt: -1 });
 productSchema.index({ categorySlug: 1, status: 1, pricePaise: 1 });
