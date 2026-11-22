@@ -13,3 +13,6 @@ firebase-service-account.json
 
 # Files uploaded through the local storage driver in development.
 uploads/
+# Firebase Admin service account (private key). Never commit.
+config/firebase-service-account.json
+*firebase-adminsdk*.json

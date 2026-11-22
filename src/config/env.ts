@@ -108,10 +108,18 @@ export const env = {
   devAuthSecret: process.env.DEV_AUTH_SECRET || "",
   firebase: {
     projectId: process.env.FIREBASE_PROJECT_ID || "",
+    /**
+     * Preferred: path to the service-account JSON (relative to the server folder), e.g.
+     * ./config/firebase-service-account.json. The file is gitignored and never served.
+     */
+    serviceAccountPath: process.env.FIREBASE_SERVICE_ACCOUNT_PATH ? path.resolve(serverRoot, process.env.FIREBASE_SERVICE_ACCOUNT_PATH) : "",
+    /** Fallback for hosts that cannot hold files: the two fields copied from the JSON. */
     clientEmail: process.env.FIREBASE_CLIENT_EMAIL || "",
     privateKey: process.env.FIREBASE_PRIVATE_KEY || "",
     credentialsPath: process.env.GOOGLE_APPLICATION_CREDENTIALS || "",
   },
+  /** The seller / partner / admin panel, for links in push notifications. */
+  panelUrl: (process.env.PANEL_APP_URL || (deployed ? "https://dashboard.suregad.in" : "http://localhost:5174")).replace(/\/+$/, ""),
   cloudinary: {
     cloudName: process.env.CLOUDINARY_CLOUD_NAME || "",
     apiKey: process.env.CLOUDINARY_API_KEY || "",
@@ -165,7 +173,8 @@ export const env = {
 
 export function integrationStatus() {
   const firebaseConfigured = Boolean(
-    (env.firebase.projectId && env.firebase.clientEmail && env.firebase.privateKey) ||
+    env.firebase.serviceAccountPath ||
+      (env.firebase.projectId && env.firebase.clientEmail && env.firebase.privateKey) ||
       env.firebase.credentialsPath,
   );
   const paymentsConfigured =

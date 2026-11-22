@@ -5,11 +5,14 @@ import { seedSystemData } from "./run";
 import { demoPassword, seedDemoData } from "./demo";
 import { ensureDemoGallery } from "./demo-gallery";
 import { ensureDemoApplicants } from "./demo-applicants";
+import { ensureFirebaseDemoLogins } from "./firebase-demo";
 
 async function main() {
   if (!env.mongoUri) throw new Error("MONGODB_URI is required to seed configuration.");
   await connectDb();
-  if (process.argv.includes("--demo-applicants")) {
+  if (process.argv.includes("--firebase-demo")) {
+    await ensureFirebaseDemoLogins();
+  } else if (process.argv.includes("--demo-applicants")) {
     await ensureDemoApplicants({ reset: process.argv.includes("--reset") });
   } else if (process.argv.includes("--demo-gallery")) {
     await ensureDemoGallery();

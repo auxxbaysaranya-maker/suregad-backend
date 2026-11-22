@@ -6,7 +6,7 @@ import { Notification } from "../models/engagement.model";
 import { User } from "../models/user.model";
 import { sendEmail, sendSms, sendWhatsApp } from "../integrations/channels";
 import { sendWebPush } from "../integrations/push";
-import { sendFirebasePush } from "../integrations/firebase";
+import { pushPaths, sendPushToUsers } from "./push.service";
 import { emitToUser } from "../realtime/io";
 
 type NotifyInput = {
@@ -24,7 +24,6 @@ type Delivery = NotifyInput & {
   phone?: string;
   prefs: UserPrefs;
   pushSubscriptions?: { endpoint: string; keys?: { p256dh?: string; auth?: string } }[];
-  fcmTokens?: string[];
 };
 
 let queue: Queue | null = null;
@@ -62,8 +61,9 @@ async function deliverExternal(input: Delivery) {
   if (input.prefs.push && input.pushSubscriptions?.length) {
     await sendWebPush(input.pushSubscriptions, { title: input.title, body: input.body, url: "/account" });
   }
-  if (input.prefs.push && input.fcmTokens?.length) {
-    await sendFirebasePush(input.fcmTokens, { title: input.title, body: input.body, url: "/account" });
+  // Firebase Cloud Messaging to every registered device (stale tokens are removed by the push service).
+  if (input.prefs.push) {
+    await sendPushToUsers([input.userId], { title: input.title, body: input.body, tag: input.event, ...pushPaths(input.data) });
   }
 }
 
@@ -109,7 +109,6 @@ export async function notify(input: NotifyInput): Promise<void> {
       endpoint: subscription.endpoint,
       keys: { p256dh: subscription.keys?.p256dh || undefined, auth: subscription.keys?.auth || undefined },
     })),
-    fcmTokens: user.fcmTokens || [],
   };
   if (queue) {
     await queue.add("deliver", payload);
@@ -122,4 +121,21 @@ export async function notify(input: NotifyInput): Promise<void> {
 
 export async function notifyMany(userIds: string[], input: Omit<NotifyInput, "userId">): Promise<void> {
   await Promise.all(userIds.map((userId) => notify({ ...input, userId })));
+}
+
+/** Audiences a super admin may message. "seller" covers individual and showroom sellers. */
+export const BROADCAST_AUDIENCES = {
+  customers: ["buyer"],
+  sellers: ["individual_seller", "business_seller"],
+  showrooms: ["business_seller"],
+  partners: ["service_partner"],
+} as const;
+
+/** Notify every active user in an audience (in-app history + push). Batched to keep load steady. */
+export async function notifyAudience(audience: keyof typeof BROADCAST_AUDIENCES, input: Omit<NotifyInput, "userId">): Promise<number> {
+  const users = await User.find({ roles: { $in: [...BROADCAST_AUDIENCES[audience]] }, status: "active", deletedAt: null }).select("_id").lean();
+  for (let start = 0; start < users.length; start += 50) {
+    await notifyMany(users.slice(start, start + 50).map((user) => String(user._id)), input);
+  }
+  return users.length;
 }

@@ -14,6 +14,8 @@ const userSchema = new Schema(
   {
     firebaseUid: { type: String, required: true, unique: true },
     email: { type: String, lowercase: true, trim: true },
+    /** Mirrors Firebase: false until the user opens the verification link. */
+    emailVerified: { type: Boolean, default: false },
     phone: { type: String, trim: true },
     displayName: { type: String, required: true, trim: true },
     passwordHash: String,

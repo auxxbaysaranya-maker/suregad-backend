@@ -1,4 +1,5 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import express from "express";
 import { z } from "zod";
 import { parse } from "csv-parse/sync";
@@ -9,7 +10,9 @@ import { env } from "../config/env";
 import { asyncHandler, sendData } from "../common/http";
 import { AppError, forbidden, notFound } from "../common/errors";
 import { requirePermission, requireUser, ensureBuyerProfile, clearPermissionCache } from "../middleware/auth";
-import { signDevToken, verifyIdentity } from "../integrations/firebase";
+import { revokeFirebaseSessions, signDevToken, verifyIdentity } from "../integrations/firebase";
+import { registerDeviceToken, unregisterDeviceToken } from "../services/push.service";
+import { DeviceToken } from "../models/device-token.model";
 import { hashPassword, verifyPassword } from "../common/crypto";
 import { claimReferral, deviceHistory, ensureReferralCode, notifyPriceAlerts } from "../services/growth.service";
 import { NewsletterSignup, PriceAlert, Referral, SellerSettlement } from "../models/engagement.model";
@@ -68,6 +71,16 @@ import { chat } from "./chat";
 import { storefront } from "./storefront";
 
 export const api = Router();
+
+/** Sign-in endpoints get a tighter budget than the API as a whole (brute force / credential stuffing). */
+const authLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: env.isTest ? 10_000 : 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: { code: "TOO_MANY_ATTEMPTS", message: "Too many sign-in attempts. Wait a few minutes and try again." } },
+});
+api.use(["/auth/session", "/auth/panel-login", "/auth/password-login", "/auth/dev-login", "/auth/panel-signup", "/auth/panel-enroll"], authLimiter);
 
 function dbGuard(req: express.Request, _res: express.Response, next: express.NextFunction) {
   if (req.path === "/auth/session") {
@@ -228,36 +241,58 @@ api.post(
 api.post(
   "/auth/session",
   asyncHandler(async (req, res) => {
-    const token = String(req.body?.token || req.header("authorization")?.replace("Bearer ", "") || "");
+    const body = z
+      .object({ token: z.string().max(8192).optional(), name: z.string().trim().min(2).max(80).optional() })
+      .parse(req.body || {});
+    const token = String(body.token || req.header("authorization")?.replace("Bearer ", "") || "");
     if (!token) throw new AppError(400, "TOKEN_REQUIRED", "Send the Firebase ID token.");
-    const identity = await verifyIdentity(token);
+    // Session start: also rejects disabled Firebase accounts and revoked sessions.
+    const identity = await verifyIdentity(token, { checkRevoked: true });
     if (mongoose.connection.readyState !== 1) {
       throw new AppError(503, "DATABASE_UNAVAILABLE", "MongoDB is not connected. Set MONGODB_URI and restart the API.");
     }
     let user = await User.findOne({ firebaseUid: identity.uid });
     const email = identity.email?.toLowerCase();
-    if (!user && email && !token.startsWith("dev.")) {
-      const seeded = await User.findOne({ email, firebaseUid: `dev:${email}` });
-      if (seeded) {
-        seeded.firebaseUid = identity.uid;
-        await seeded.save();
-        user = seeded;
+    // An existing account is linked by email only when Firebase has verified that email,
+    // so nobody can claim someone else's account by registering their address.
+    const verifiedEmail = email && identity.emailVerified !== false && identity.provider !== "dev" ? email : undefined;
+    if (!user && email) {
+      const sameEmail = await User.findOne({ email, firebaseUid: { $ne: identity.uid }, status: { $ne: "deleted" } });
+      if (sameEmail) {
+        if (!verifiedEmail) {
+          throw new AppError(409, "VERIFY_EMAIL_TO_LINK", "An account with this email already exists. Verify your email (check your inbox), then sign in again.");
+        }
+        if (sameEmail.firebaseUid.startsWith("dev:")) {
+          sameEmail.firebaseUid = identity.uid;
+          await sameEmail.save();
+          user = sameEmail;
+        } else {
+          throw new AppError(409, "ACCOUNT_CONFLICT", "This email is already linked to another sign-in. Use the method you signed up with.");
+        }
       }
     }
     if (!user) {
       const roles = ["buyer"];
-      if (email && env.adminBootstrapEmails.includes(email)) {
+      if (verifiedEmail && env.adminBootstrapEmails.includes(verifiedEmail)) {
         const existingAdmin = await User.exists({ roles: "super_admin", status: "active" });
         if (!existingAdmin) roles.push("super_admin");
       }
-      user = await User.create({
-        firebaseUid: identity.uid,
-        email,
-        phone: identity.phone,
-        displayName: identity.name || email || identity.phone || "SureGad user",
-        photoUrl: identity.picture,
-        roles,
-      });
+      try {
+        user = await User.create({
+          firebaseUid: identity.uid,
+          email,
+          phone: identity.phone,
+          displayName: body.name || identity.name || email?.split("@")[0] || identity.phone || "SureGad user",
+          photoUrl: identity.picture,
+          emailVerified: identity.emailVerified !== false,
+          roles,
+        });
+      } catch (error) {
+        // Two tabs finishing sign-up at once: the other request created the user.
+        if ((error as { code?: number }).code !== 11000) throw error;
+        user = await User.findOne({ firebaseUid: identity.uid });
+        if (!user) throw error;
+      }
       await ensureBuyerProfile(String(user._id));
       await notify({
         userId: String(user._id),
@@ -266,13 +301,16 @@ api.post(
         body: "Your account is ready. Buyers can enquire, request inspections and check out when a device is available.",
       });
     } else {
+      if (user.status === "suspended") throw new AppError(403, "ACCOUNT_SUSPENDED", user.suspendedReason || "This account is suspended.");
+      if (user.status === "deleted") throw new AppError(403, "ACCOUNT_DELETED", "This account has been deleted.");
       if (email && !user.email) user.email = email;
       if (identity.phone && !user.phone) user.phone = identity.phone;
-      if (identity.name && user.displayName === "SureGad user") user.displayName = identity.name;
+      if ((body.name || identity.name) && user.displayName === "SureGad user") user.displayName = body.name || identity.name!;
       if (identity.picture) user.photoUrl = identity.picture;
+      if (identity.provider !== "dev") user.set("emailVerified", identity.emailVerified !== false);
       await user.save();
     }
-    if (email && env.adminBootstrapEmails.includes(email) && !user.roles.includes("super_admin")) {
+    if (verifiedEmail && env.adminBootstrapEmails.includes(verifiedEmail) && !user.roles.includes("super_admin")) {
       const existingAdmin = await User.exists({ roles: "super_admin", status: "active" });
       if (!existingAdmin) {
         user.roles.push("super_admin");
@@ -286,11 +324,27 @@ api.post(
   }),
 );
 
+/** Sign out of this device: forget its push token. The browser signs out of Firebase itself. */
 api.post(
   "/auth/logout",
   requireUser,
   asyncHandler(async (req, res) => {
+    const body = z.object({ pushToken: z.string().max(4096).optional() }).parse(req.body || {});
+    if (body.pushToken) await unregisterDeviceToken(req.user!._id as never, body.pushToken);
+    sendData(res, { signedOut: true });
+  }),
+);
+
+/** Sign out everywhere: every existing session token stops working and all push devices are removed. */
+api.post(
+  "/auth/logout-everywhere",
+  requireUser,
+  asyncHandler(async (req, res) => {
+    const user = await User.findById(req.user!._id).select("firebaseUid");
     await User.updateOne({ _id: req.user!._id }, { tokenValidAfter: new Date() });
+    if (user) await revokeFirebaseSessions(user.firebaseUid);
+    await DeviceToken.deleteMany({ userId: req.user!._id });
+    await audit(req, "auth.logout_everywhere", "User", String(req.user!._id));
     sendData(res, { revoked: true });
   }),
 );
@@ -674,9 +728,19 @@ authed.use(requireUser);
 authed.post(
   "/notifications/fcm-token",
   asyncHandler(async (req, res) => {
-    const body = z.object({ token: z.string().min(20) }).parse(req.body);
-    await User.updateOne({ _id: req.user!._id }, { $addToSet: { fcmTokens: body.token }, $set: { "notificationPreferences.push": true } });
+    // The owner is always the signed-in user; a user id is never accepted from the client.
+    const body = z.object({ token: z.string().min(100).max(4096), app: z.enum(["marketplace", "panel"]).default("marketplace") }).parse(req.body);
+    await registerDeviceToken(req.user!._id as never, body.token, body.app, req.header("user-agent"));
+    await User.updateOne({ _id: req.user!._id }, { $set: { "notificationPreferences.push": true } });
     sendData(res, { subscribed: true });
+  }),
+);
+
+authed.delete(
+  "/notifications/fcm-token",
+  asyncHandler(async (req, res) => {
+    const body = z.object({ token: z.string().min(20).max(4096) }).parse(req.body);
+    sendData(res, { removed: await unregisterDeviceToken(req.user!._id as never, body.token) });
   }),
 );
 
@@ -1589,6 +1653,19 @@ admin.patch(
     sendData(res, saved);
   }),
 );
+/** Message an audience (in-app + push). Admin only; every broadcast is audited. */
+admin.post(
+  "/notifications/broadcast",
+  asyncHandler(async (req, res) => {
+    const body = z
+      .object({ audience: z.enum(["customers", "sellers", "showrooms", "partners"]), title: z.string().trim().min(3).max(120), body: z.string().trim().min(3).max(400) })
+      .parse(req.body);
+    const { notifyAudience } = await import("../services/notification.service");
+    const recipients = await notifyAudience(body.audience, { event: "broadcast", title: body.title, body: body.body });
+    await audit(req, "notifications.broadcast", "Audience", body.audience, { title: body.title, recipients });
+    sendData(res, { recipients });
+  }),
+);
 admin.get("/audit", asyncHandler(async (_req, res) => sendData(res, await AuditLog.find().sort({ createdAt: -1 }).limit(100).lean())));
 admin.get("/payments", asyncHandler(async (_req, res) => sendData(res, await Payment.find().sort({ createdAt: -1 }).limit(100).lean())));
 admin.get("/orders", asyncHandler(async (_req, res) => sendData(res, await Order.find().sort({ createdAt: -1 }).limit(100).lean())));
@@ -1682,6 +1759,7 @@ async function publicUser(id: string) {
     id: user._id,
     displayName: user.displayName,
     email: user.email,
+    emailVerified: user.emailVerified !== false || user.firebaseUid.startsWith("dev:"),
     phone: user.sharePhone ? user.phone : undefined,
     phoneOnFile: Boolean(user.phone),
     photoUrl: user.photoUrl,

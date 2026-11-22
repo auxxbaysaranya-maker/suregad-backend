@@ -63,3 +63,25 @@ NODE_ENV=production npm start
 ```
 
 Serve it over HTTPS, set `CLIENT_ORIGIN` to the web app's origin, and point the Razorpay webhook at `https://<api-host>/api/v1/payments/webhooks/razorpay`.
+
+## Firebase (sign-in and push)
+
+Firebase Authentication verifies who a user is; MongoDB stays the authority for roles, approvals and account status.
+
+1. Firebase Console → Project settings → Service accounts → **Generate new private key**.
+2. Save the file as `server/config/firebase-service-account.json` (gitignored — never commit it).
+3. In `server/.env`:
+   ```
+   FIREBASE_PROJECT_ID=<project id>
+   FIREBASE_SERVICE_ACCOUNT_PATH=./config/firebase-service-account.json
+   ```
+   Hosts that cannot store files can instead set `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL` and `FIREBASE_PRIVATE_KEY` (copied from the JSON; keep the `\n` escapes).
+
+On startup the API logs "Firebase Admin initialised", or a clear error naming the missing or invalid setting. Key material is never logged.
+
+- `POST /auth/session` exchanges a Firebase ID token for the SureGad profile. It creates the profile on first sign-in and links an existing account only when Firebase has verified the email.
+- `POST /auth/panel-enroll` adds the seller or partner role (never admin) and starts a draft application.
+- `POST` / `DELETE /notifications/fcm-token` registers or removes this device's push token. The owner is always the signed-in user.
+- `POST /auth/logout` signs out this device; `POST /auth/logout-everywhere` revokes every session.
+- `POST /admin/notifications/broadcast` is super-admin only and audited.
+- `npm run seed:firebase-demo` (optional) creates Firebase logins for the demo accounts (password 123456) and links them.

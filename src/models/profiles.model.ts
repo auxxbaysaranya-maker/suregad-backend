@@ -12,9 +12,13 @@ export const SHOWROOM_STATUSES = [
 ] as const;
 export type ShowroomStatus = (typeof SHOWROOM_STATUSES)[number];
 
+/**
+ * GeoJSON point. No defaults: a profile without a map pin must have no `location` at all,
+ * because the 2dsphere index rejects a half-empty point ({ type: "Point", coordinates: [] }).
+ */
 const pointSchema = {
-  type: { type: String, enum: ["Point"], default: "Point" },
-  coordinates: { type: [Number] },
+  type: { type: String, enum: ["Point"] },
+  coordinates: { type: [Number], default: undefined },
 };
 
 const addressSchema = new Schema(
