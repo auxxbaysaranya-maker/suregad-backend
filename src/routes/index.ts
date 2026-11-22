@@ -73,7 +73,6 @@ import { devAuth } from "./dev-auth";
 import { chat } from "./chat";
 import { storefront } from "./storefront";
 import { discovery } from "./discovery";
-import { geo } from "./geo";
 
 export const api = Router();
 
@@ -1789,7 +1788,6 @@ api.post(
 api.use("/chat", chat);
 api.use(storefront);
 api.use(discovery);
-api.use(geo);
 api.use(showroom);
 api.use(support);
 api.use(authed);
