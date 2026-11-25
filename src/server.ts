@@ -10,6 +10,7 @@ import { seedSystemData } from "./seed/run";
 import { startNotificationWorker } from "./services/notification.service";
 import { releaseExpiredReservations } from "./services/commerce.service";
 import { expireOffers } from "./services/inspection.service";
+import { expireListings } from "./services/selling.service";
 import { startShowroomJobs } from "./services/promotion.service";
 import { migrateShowrooms } from "./seed/showroom-migration";
 import { restoreDemoDocuments } from "./seed/demo-applicants";
@@ -86,6 +87,7 @@ async function main() {
   setInterval(() => {
     if (mongoose.connection.readyState !== 1) return;
     releaseExpiredReservations().catch((error) => logger.error(error));
+    expireListings().catch((error) => logger.error({ err: error }, "Listing expiry failed"));
     expireOffers().catch((error) => logger.error(error));
   }, 60_000);
   server.listen(env.port, () => {

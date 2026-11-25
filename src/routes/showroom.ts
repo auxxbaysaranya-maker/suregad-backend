@@ -67,6 +67,8 @@ import {
 } from "../services/showroom-orders.service";
 import { signedDownload, readLocalUpload } from "../integrations/storage";
 import { releaseFiles } from "../services/files.service";
+import { markSold, renewListing } from "../services/selling.service";
+import { monthlyListingCount } from "../services/entitlement.service";
 
 export const showroom = Router();
 const seller = Router();
@@ -276,6 +278,8 @@ function presentListing(product: Record<string, any>) {
       ? { lat: coordinates[1], lng: coordinates[0], city: product.city || "", district: product.district || "", state: product.state || "Kerala", pincode: product.pincode || "" }
       : null,
     status: product.status,
+    expiresAt: product.expiresAt || null,
+    soldOut: product.soldOut?.at ? { at: product.soldOut.at, reason: product.soldOut.reason, note: product.soldOut.note || "" } : null,
     published: product.published !== false,
     onHold: product.businessHold === true,
     rejectionReason: product.rejectionReason || null,
@@ -560,6 +564,7 @@ seller.patch(
     const product = await ownListing(req, req.params.id);
     const input = editSchema.parse(req.body);
     if (product.inventory?.state === "sold" && !product.stockTracked) throw new AppError(409, "SOLD", "Sold listings can't be edited.");
+    if (product.status === "expired" || product.soldOut?.at) throw new AppError(409, "NOT_EDITABLE", "Renew or publish this listing again before editing it.");
     let reReview = false;
     for (const key of ["title", "description", "condition"] as const) {
       if (input[key] !== undefined && input[key] !== product[key]) {
@@ -625,6 +630,11 @@ seller.post(
 async function publishListing(req: Request, product: InstanceType<typeof Product>, publish: boolean) {
   if (publish) {
     product.published = true;
+    if (product.status === "sold" && product.soldOut?.at) {
+      // Back on sale: reviewed again inside its validity; an ended validity needs a renewal.
+      for (const field of ["at", "reason", "note", "buyerUserId", "pricePaise", "by"]) product.set(`soldOut.${field}`, undefined);
+      product.status = product.expiresAt && product.expiresAt <= new Date() ? "expired" : "pending_review";
+    }
     if (product.status === "draft" || product.status === "rejected") product.status = "pending_review";
   } else {
     product.published = false;
@@ -656,6 +666,23 @@ seller.post(
   asyncHandler(async (req, res) => {
     await archiveListing(req, await ownListing(req, req.params.id));
     sendData(res, { archived: true });
+  }),
+);
+
+/** Take a listing down as sold out, with a reason, before its validity ends. */
+seller.post(
+  "/products/:id/sold",
+  asyncHandler(async (req, res) => {
+    const product = await markSold(req, await ownListing(req, String(req.params.id)), req.body);
+    sendData(res, presentListing(product.toObject()));
+  }),
+);
+
+seller.post(
+  "/products/:id/renew",
+  asyncHandler(async (req, res) => {
+    const product = await renewListing(req, await ownListing(req, String(req.params.id)));
+    sendData(res, presentListing(product.toObject()));
   }),
 );
 
@@ -1652,9 +1679,7 @@ seller.get(
       Promise.resolve(0),
     ]);
     void photosMax;
-    const { kolkataMonthRange } = await import("../common/time");
-    const { start, end } = kolkataMonthRange();
-    const monthlyListings = await Product.countDocuments({ businessId: id, deletedAt: null, createdAt: { $gte: start, $lt: end } });
+    const monthlyListings = await monthlyListingCount({ businessId: id });
     const plan = subscription ? plans.find((row) => String(row._id) === String(subscription.planId)) || (await SubscriptionPlan.findById(subscription.planId).lean()) : null;
     sendData(res, {
       entitlements,

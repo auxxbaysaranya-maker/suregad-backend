@@ -6,7 +6,8 @@ import { AppError, forbidden, notFound } from "../common/errors";
 import { encryptSecret, hashIdentifier, lastDigits, slugify } from "../common/crypto";
 import { mediaUrl, storedImageUrl } from "../integrations/storage";
 import { releaseArchivedListingImages, releaseProductImages } from "./files.service";
-import { assertCanCreateListing, getEntitlements, recordUsage } from "./entitlement.service";
+import { addDays } from "../common/time";
+import { assertCanCreateListing, getEntitlements, monthlyListingCount, recordUsage } from "./entitlement.service";
 import type { Request } from "express";
 import { containsText, nearestPage, parseGeoQuery, recordDistanceKm, withinRadius } from "./geo.service";
 
@@ -54,6 +55,8 @@ export function presentProduct(product: Record<string, unknown>, detailed = fals
       : { inspected: false },
     geo: approximateGeo(product.location),
     createdAt: product.createdAt,
+    /** Ordinary users' devices are sold in chat only: no cart or checkout. */
+    chatOnly: product.sellerType === "individual",
     listingCode: product.listingCode || undefined,
     itemType: product.itemType || "used",
     stock: product.stockTracked ? { available: Number((product.stock as { available?: number } | undefined)?.available || 0) } : undefined,
@@ -172,6 +175,12 @@ export async function createListing(req: Request, body: unknown) {
     identifier,
     inventory: { state: "available" },
   });
+  // Two submissions at the same moment can both pass the check above; the extra one is undone.
+  const used = await monthlyListingCount(businessId ? { businessId } : { sellerUserId: user._id, sellerType: "individual" });
+  if (used > entitlements.limits.monthlyListings) {
+    await Product.deleteOne({ _id: product._id });
+    throw new AppError(403, "MONTHLY_LISTING_LIMIT", "Monthly listing limit for the current plan has been reached.");
+  }
   await recordUsage(entitlements.subscriptionId, "listing_created", { productId: product._id });
   return presentProduct(product.toObject(), true);
 }
@@ -258,7 +267,13 @@ export async function setListingStatus(productId: string, status: string, reason
   if (status === "active" && product.inventory?.state === "sold") {
     throw new AppError(409, "ALREADY_SOLD", "A sold device cannot be republished.");
   }
+  if (status === "active" && product.soldOut?.at) throw new AppError(409, "ALREADY_SOLD", "The seller marked this listing sold.");
   product.status = status as never;
+  if (status === "active" && (!product.expiresAt || product.expiresAt <= new Date())) {
+    // Validity starts when the listing first goes live; edits and re-reviews do not extend it.
+    const { limits } = await getEntitlements(product.businessId ? { businessId: String(product.businessId) } : { userId: String(product.sellerUserId) });
+    product.set("expiresAt", limits.listingValidityDays > 0 ? addDays(new Date(), limits.listingValidityDays) : undefined);
+  }
   if (status === "rejected") product.rejectionReason = reason || "Rejected by moderation.";
   if (status === "archived") {
     product.deletedAt = new Date();
@@ -312,6 +327,7 @@ export async function updateListingImages(req: Request, productId: string, body:
   if (String(product.sellerUserId) !== userId && !admin) throw forbidden();
   // Showroom listings track stock per unit: "sold" there only means no unit is available right now.
   if (product.inventory?.state === "sold" && !product.stockTracked) throw new AppError(409, "SOLD", "Sold listings cannot be edited.");
+  if (["expired", "sold"].includes(product.status) && !admin) throw new AppError(409, "NOT_EDITABLE", "This listing is no longer live. Renew it before editing.");
   const unique = [...new Set(imageKeys)];
   const existing = new Map((product.images || []).map((image) => [image.key || "", storedImageUrl(image) || ""]));
   if (!admin) assertOwnImageKeys(unique, userId, new Set(existing.keys()));
@@ -327,7 +343,7 @@ export async function updateListingImages(req: Request, productId: string, body:
     "images",
     unique.map((key, sort) => ({ key, url: existing.get(key) || mediaUrl(key), sort })),
   );
-  if (product.status === "active" && !admin) product.status = "pending_review";
+  if (["active", "rejected"].includes(product.status) && !admin) product.status = "pending_review";
   await product.save();
   // Photos taken off the listing are deleted from storage (unless another listing still uses them).
   await releaseProductImages([...existing.keys()].filter((key) => !unique.includes(key)));

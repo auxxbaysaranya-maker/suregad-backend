@@ -23,6 +23,7 @@ export type ProductCondition = (typeof PRODUCT_CONDITIONS)[number];
 export const PRODUCT_STATUSES = [
   "draft",
   "pending_review",
+  "expired",
   "active",
   "rejected",
   "reserved",

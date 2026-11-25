@@ -14,11 +14,24 @@ export interface Entitlements {
     monthlyListings: number;
     photosPerListing: number;
     employees: number;
+    /** Days a listing stays live (0 = no limit). */
+    listingValidityDays: number;
   };
   features: Record<string, unknown>;
 }
 
-const emptyLimits = { activeListings: 0, monthlyListings: 0, photosPerListing: 0, employees: 0 };
+const DEFAULT_VALIDITY_DAYS = 30;
+const emptyLimits = { activeListings: 0, monthlyListings: 0, photosPerListing: 0, employees: 0, listingValidityDays: DEFAULT_VALIDITY_DAYS };
+
+/** Listings used this month: everything created (deleting one does not give the slot back) plus renewals. */
+export async function monthlyListingCount(owner: Record<string, unknown>): Promise<number> {
+  const { start, end } = kolkataMonthRange();
+  const [created, renewed] = await Promise.all([
+    Product.countDocuments({ ...owner, createdAt: { $gte: start, $lt: end } }),
+    Product.find({ ...owner, renewals: { $elemMatch: { $gte: start, $lt: end } } }).select("renewals").lean(),
+  ]);
+  return created + renewed.reduce((sum, row) => sum + ((row.renewals || []) as unknown as Date[]).filter((at) => at >= start && at < end).length, 0);
+}
 
 export async function getEntitlements(input: {
   userId?: string;
@@ -46,6 +59,7 @@ export async function getEntitlements(input: {
     monthlyListings: Number(subscription.overrideLimits?.monthlyListings ?? planLimits.monthlyListings),
     photosPerListing: Number(subscription.overrideLimits?.photosPerListing ?? planLimits.photosPerListing),
     employees: Number(subscription.overrideLimits?.employees ?? planLimits.employees ?? 0),
+    listingValidityDays: Number(subscription.overrideLimits?.listingValidityDays ?? plan.limits?.listingValidityDays ?? DEFAULT_VALIDITY_DAYS),
   };
   return {
     active: true,
@@ -86,14 +100,9 @@ export async function assertCanCreateListing(input: {
   if (activeCount >= entitlements.limits.activeListings) {
     throw new AppError(403, "LISTING_LIMIT", "Active listing limit for the current plan has been reached.");
   }
-  const { start, end } = kolkataMonthRange();
-  const monthlyCount = await Product.countDocuments({
-    ...ownerFilter,
-    deletedAt: null,
-    createdAt: { $gte: start, $lt: end },
-  });
+  const monthlyCount = await monthlyListingCount(ownerFilter);
   if (monthlyCount >= entitlements.limits.monthlyListings) {
-    throw new AppError(403, "MONTHLY_LISTING_LIMIT", "Monthly listing limit for the current plan has been reached.");
+    throw new AppError(403, "MONTHLY_LISTING_LIMIT", `You've used all ${entitlements.limits.monthlyListings} listings for this month. Your allowance resets next month.`);
   }
   return entitlements;
 }

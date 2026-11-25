@@ -40,7 +40,8 @@ export async function getCart(userId: string) {
           title: product.title,
           pricePaise: product.pricePaise,
           status: product.status,
-          available: product.status === "active" && product.inventory?.state === "available",
+          available: product.sellerType !== "individual" && product.status === "active" && product.inventory?.state === "available",
+          chatOnly: product.sellerType === "individual",
           sellerUserId: String(product.sellerUserId),
           city: product.city,
           image: product.images?.[0]?.url,
@@ -55,6 +56,7 @@ export async function addCartItem(userId: string, productId: string) {
   if (!product || product.inventory?.state !== "available") {
     throw new AppError(409, "UNAVAILABLE", "This device is not available to purchase.");
   }
+  if (product.sellerType === "individual") throw new AppError(409, "CHAT_ONLY", "This device is sold by an individual. Chat with the seller to buy it.");
   if (String(product.sellerUserId) === userId) throw new AppError(400, "OWN_LISTING", "You cannot buy your own listing.");
   await Cart.updateOne(
     { userId },
@@ -99,6 +101,8 @@ export async function checkout(req: Request, input: { addressId?: string; fulfil
   }
   const ids = input.productIds?.length ? input.productIds : cart?.items.map((item) => String(item.productId)) || [];
   if (!ids.length) throw new AppError(400, "EMPTY_CART", "Your cart is empty.");
+  const chatOnly = await Product.findOne({ _id: { $in: ids.filter((id) => mongoose.isValidObjectId(id)) }, sellerType: "individual" }).select("title").lean();
+  if (chatOnly) throw new AppError(409, "CHAT_ONLY", `${chatOnly.title} is sold by an individual through chat. Remove it from your cart and message the seller.`);
   const priceOf = (product: { _id: unknown; pricePaise: number }) =>
     offer && String(product._id) === String(offer.productId) ? offer.amountPaise : product.pricePaise;
   const buyer = await BuyerProfile.findOne({ userId: user._id });

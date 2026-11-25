@@ -134,8 +134,8 @@ chat.post(
     const sellerUserId = String(product.sellerUserId);
     if (sellerUserId === userId) throw new AppError(400, "OWN_LISTING", "This is your own listing.");
     let conversation =
-      (await Conversation.findOne({ buyerId: userId, sellerUserId, productId: product._id })) ||
-      (await Conversation.findOne({ productId: product._id, participantIds: { $all: [userId, sellerUserId] } }).sort({ createdAt: -1 }));
+      (await Conversation.findOne({ kind: { $ne: "inspection" }, buyerId: userId, sellerUserId, productId: product._id })) ||
+      (await Conversation.findOne({ kind: { $ne: "inspection" }, productId: product._id, participantIds: { $all: [userId, sellerUserId] } }).sort({ createdAt: -1 }));
     if (!conversation) {
       conversation = await Conversation.create({
         participantIds: [userId, sellerUserId],
@@ -412,8 +412,11 @@ chat.post(
     if (body.action === "accept") offer.expiresAt = new Date(Date.now() + OFFER_HOLD_HOURS * 60 * 60 * 1000);
     await offer.save();
     const amount = formatInr(offer.amountPaise);
+    const listing = await Product.findById(offer.productId).select("sellerType").lean();
     const text =
-      body.action === "accept"
+      body.action === "accept" && listing?.sellerType === "individual"
+        ? `Offer of ${amount} accepted. Arrange a safe place to meet here, check the device, then pay the seller directly. The seller marks it sold after the handover.`
+        : body.action === "accept"
         ? `Offer of ${amount} accepted. The buyer can check out at this price for ${OFFER_HOLD_HOURS} hours.`
         : body.action === "reject"
           ? `Offer of ${amount} declined.`

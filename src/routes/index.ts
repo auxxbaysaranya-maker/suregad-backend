@@ -73,6 +73,7 @@ import { devAuth } from "./dev-auth";
 import { chat } from "./chat";
 import { storefront } from "./storefront";
 import { discovery } from "./discovery";
+import { selling } from "./selling";
 
 export const api = Router();
 
@@ -884,10 +885,15 @@ authed.patch(
       })
       .parse(req.body);
     if (product.inventory?.state === "sold") throw new AppError(409, "SOLD", "Sold listings cannot be edited.");
+    if (["expired", "sold"].includes(product.status)) throw new AppError(409, "NOT_EDITABLE", "This listing is no longer live. Renew it before editing.");
+    const dropped = Boolean(body.pricePaise && body.pricePaise < product.pricePaise);
+    if (body.pricePaise && body.pricePaise !== product.pricePaise) {
+      product.priceHistory.push({ pricePaise: body.pricePaise, reason: "manual", by: req.user!._id as never, at: new Date() });
+    }
     Object.assign(product, body);
-    if (product.status === "active") product.status = "pending_review";
+    if (["active", "rejected"].includes(product.status)) product.status = "pending_review";
     await product.save();
-    if (body.pricePaise) await notifyPriceAlerts(String(product._id), product.pricePaise);
+    if (dropped) await notifyPriceAlerts(String(product._id), product.pricePaise);
     sendData(res, presentProduct(product.toObject() as never, true));
   }),
 );
@@ -1436,14 +1442,33 @@ authed.get(
 authed.get(
   "/me/inspections",
   asyncHandler(async (req, res) => {
-    const requests = await InspectionRequest.find({ buyerId: req.user!._id }).sort({ createdAt: -1 }).lean();
+    // Inspections this person booked and, once paid, those booked on devices they sell.
+    const me = req.user!._id;
+    const requests = await InspectionRequest.find({ $or: [{ buyerId: me }, { sellerUserId: me, status: { $ne: "pending_payment" } }] }).sort({ createdAt: -1 }).limit(100).lean();
+    const [threads, devices] = await Promise.all([
+      Conversation.find({ kind: "inspection", inspectionRequestId: { $in: requests.map((item) => item._id) }, participantIds: me }).select("inspectionRequestId").lean(),
+      Product.find({ _id: { $in: requests.map((item) => item.productId) } }).select("title slug").lean(),
+    ]);
     const reports = await InspectionReport.find({ requestId: { $in: requests.map((item) => item._id) } }).sort({ version: -1 }).select("requestId").lean();
     const latest = new Map<string, string>();
     for (const report of reports) {
       const key = String(report.requestId);
       if (!latest.has(key)) latest.set(key, String(report._id));
     }
-    sendData(res, requests.map((item) => ({ ...item, reportId: latest.get(String(item._id)) })));
+    sendData(
+      res,
+      requests.map((item) => {
+        const device = devices.find((row) => String(row._id) === String(item.productId));
+        const thread = threads.find((row) => String(row.inspectionRequestId) === String(item._id));
+        return {
+          ...item,
+          reportId: latest.get(String(item._id)),
+          role: String(item.buyerId) === String(me) ? "buyer" : "seller",
+          product: device ? { title: device.title, slug: device.slug } : null,
+          conversationId: thread ? String(thread._id) : null,
+        };
+      }),
+    );
   }),
 );
 authed.get(
@@ -1632,11 +1657,16 @@ admin.patch(
             monthlyListings: z.number().int().nonnegative(),
             photosPerListing: z.number().int().nonnegative(),
             employees: z.number().int().nonnegative(),
+            listingValidityDays: z.number().int().min(0).max(365),
           })
+          .partial()
           .optional(),
       })
       .parse(req.body);
-    const plan = await SubscriptionPlan.findOneAndUpdate({ code: req.params.code }, body, { new: true });
+    const { limits, ...rest } = body;
+    // Only the limits that were sent change.
+    const changes = { ...rest, ...Object.fromEntries(Object.entries(limits || {}).map(([key, value]) => [`limits.${key}`, value])) };
+    const plan = await SubscriptionPlan.findOneAndUpdate({ code: req.params.code }, { $set: changes }, { new: true });
     if (!plan) throw notFound();
     await audit(req, "plan.updated", "SubscriptionPlan", plan.code, body);
     sendData(res, plan);
@@ -1788,6 +1818,7 @@ api.post(
 api.use("/chat", chat);
 api.use(storefront);
 api.use(discovery);
+api.use(selling);
 api.use(showroom);
 api.use(support);
 api.use(authed);

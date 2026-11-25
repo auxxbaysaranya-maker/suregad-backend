@@ -143,16 +143,28 @@ export async function markOffersPurchased(orderId: unknown, orderNumber: string)
 }
 
 /**
- * Seller ↔ service-partner thread for one inspection, opened when the partner accepts the job.
- * The partner is stored in buyerId so each side resolves the other; offers are disabled for this kind.
+ * Partner chats for one inspection, opened when the partner accepts the job: one with the seller and,
+ * when someone else booked it, one with the buyer. Offers are disabled for this kind.
  */
 export async function openInspectionChat(
-  request: { _id: unknown; number: string; mode?: string | null; sellerUserId: unknown; productId: unknown; conversationId?: unknown; save: () => Promise<unknown> },
+  request: { _id: unknown; number: string; mode?: string | null; sellerUserId: unknown; buyerId: unknown; productId: unknown; conversationId?: unknown; save: () => Promise<unknown> },
   partnerUserId: string,
 ) {
+  const buyerId = String(request.buyerId);
   const sellerUserId = String(request.sellerUserId);
+  if (buyerId !== sellerUserId) await openPartnerThread(request, partnerUserId, buyerId, "Use this chat to ask the partner about your inspection.");
+  const thread = await openPartnerThread(request, partnerUserId, sellerUserId, "Use this chat to arrange access to the device.");
+  if (thread && String(request.conversationId || "") !== String(thread._id)) {
+    request.conversationId = thread._id;
+    await request.save();
+  }
+  return thread;
+}
+
+/** The partner is stored in buyerId and the other person in sellerUserId, so each side resolves the other. */
+async function openPartnerThread(request: { _id: unknown; number: string; mode?: string | null; productId: unknown }, partnerUserId: string, sellerUserId: string, hint: string) {
   if (sellerUserId === partnerUserId) return null;
-  let conversation = await Conversation.findOne({ kind: "inspection", inspectionRequestId: request._id });
+  let conversation = await Conversation.findOne({ kind: "inspection", inspectionRequestId: request._id, participantIds: { $all: [partnerUserId, sellerUserId] } });
   if (!conversation) {
     conversation = await Conversation.create({
       kind: "inspection",
@@ -164,11 +176,9 @@ export async function openInspectionChat(
       lastMessageAt: new Date(),
       lastPreview: "",
     });
-    (request as { conversationId?: unknown }).conversationId = conversation._id;
-    await request.save();
     await postMessage(conversation, partnerUserId, {
       kind: "system",
-      body: `Inspection ${request.number} (${request.mode === "online" ? "online video" : "physical"}) was accepted. Use this chat to arrange access to the device. Findings are recorded only in the partner's report.`,
+      body: `Inspection ${request.number} (${request.mode === "online" ? "online video" : "physical"}) was accepted. ${hint} Findings are recorded only in the partner's report.`,
     });
   }
   return conversation;

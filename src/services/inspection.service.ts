@@ -59,6 +59,8 @@ export async function allocatePartner(requestId: string): Promise<void> {
     categories: product.categorySlug,
     deletedAt: null,
     _id: { $nin: request.excludedPartnerIds },
+    // Nobody inspects a device they are buying or selling.
+    userId: { $nin: [request.buyerId, request.sellerUserId] },
     location: {
       $near: {
         $geometry: { type: "Point", coordinates: coords },

@@ -9,6 +9,7 @@ import { signDevToken } from "../src/integrations/firebase";
 import { mockPaymentSignature } from "../src/integrations/payments";
 import { scoreInspection } from "../src/services/scoring.service";
 import { User } from "../src/models/user.model";
+import { Product } from "../src/models/catalog.model";
 import { InspectionPlan } from "../src/models/inspection.model";
 
 const app = createApp();
@@ -27,6 +28,7 @@ beforeAll(async () => {
     mongo = await MongoMemoryServer.create();
     await connectDb(mongo.getUri());
     await seedSystemData();
+    await Product.init();
     databaseReady = true;
   } catch (error) {
     console.warn("MongoDB test instance did not start. Database integration cases will be skipped.", error);
@@ -106,7 +108,7 @@ describe("SureGad platform", () => {
     };
 
     const created = [];
-    for (const title of ["Pixel 8 128GB Excellent", "Pixel 8 128GB Spare", "Pixel 8 128GB Third"]) {
+    for (const title of ["Pixel 8 128GB Excellent", "Pixel 8 128GB Spare"]) {
       const response = await request(app)
         .post("/api/v1/products")
         .set("Authorization", `Bearer ${seller.token}`)
@@ -117,9 +119,9 @@ describe("SureGad platform", () => {
     const limited = await request(app)
       .post("/api/v1/products")
       .set("Authorization", `Bearer ${seller.token}`)
-      .send({ ...listingBody, title: "Pixel 8 128GB Fourth", imei: undefined });
+      .send({ ...listingBody, title: "Pixel 8 128GB Third", imei: undefined });
     expect(limited.status).toBe(403);
-    expect(limited.body.error.code).toBe("LISTING_LIMIT");
+    expect(limited.body.error.code).toBe("MONTHLY_LISTING_LIMIT");
 
     const duplicate = await request(app)
       .post("/api/v1/products")
@@ -137,6 +139,13 @@ describe("SureGad platform", () => {
     expect(search.body.data.some((item: { slug: string }) => item.slug === created[0].slug)).toBe(true);
     expect(search.body.data[0].inspection.inspected).toBe(false);
 
+    // Individuals sell in chat only; the checkout below runs on a business listing.
+    await request(app)
+      .post("/api/v1/cart/items")
+      .set("Authorization", `Bearer ${buyer.token}`)
+      .send({ productId: created[0].id })
+      .expect(409);
+    await Product.updateOne({ _id: created[0].id }, { sellerType: "business" });
     await request(app)
       .post("/api/v1/cart/items")
       .set("Authorization", `Bearer ${buyer.token}`)

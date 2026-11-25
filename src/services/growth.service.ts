@@ -62,10 +62,11 @@ export async function notifyPriceAlerts(productId: string, pricePaise: number): 
 
 export async function deviceHistory(productId: string) {
   const product = await Product.findById(productId).select("identifier").lean();
-  const hash = product?.identifier?.imeiHash || product?.identifier?.serialHash;
+  // Listings marked sold keep the fingerprint behind a "sold:<id>:" prefix.
+  const hash = (product?.identifier?.imeiHash || product?.identifier?.serialHash)?.split(":").pop();
   if (!hash) return [];
   const field = product?.identifier?.imeiHash ? "identifier.imeiHash" : "identifier.serialHash";
-  const rows = await Product.find({ _id: { $ne: productId }, [field]: hash, deletedAt: null })
+  const rows = await Product.find({ _id: { $ne: productId }, [field]: { $in: [hash, new RegExp("^sold:[a-f0-9]{24}:" + hash + "$")] }, deletedAt: null })
     .sort({ createdAt: -1 })
     .limit(10)
     .select("title status city createdAt")

@@ -12,6 +12,8 @@ const subscriptionPlanSchema = new Schema(
       monthlyListings: { type: Number, required: true },
       photosPerListing: { type: Number, required: true },
       employees: { type: Number, default: 0 },
+      /** Days a listing stays live before it expires (0 = no limit). */
+      listingValidityDays: { type: Number, min: 0 },
     },
     features: { type: Schema.Types.Mixed, default: {} },
     gracePeriodDays: { type: Number, default: 3 },

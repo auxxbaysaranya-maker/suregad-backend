@@ -64,7 +64,7 @@ const productSchema = new Schema(
     },
     status: {
       type: String,
-      enum: ["draft", "pending_review", "active", "rejected", "reserved", "sold", "archived"],
+      enum: ["draft", "pending_review", "active", "rejected", "reserved", "sold", "expired", "archived"],
       default: "draft",
       index: true,
     },
@@ -117,6 +117,19 @@ const productSchema = new Schema(
       type: [{ pricePaise: Number, reason: String, by: Schema.Types.ObjectId, at: { type: Date, default: Date.now } }],
       default: [],
     },
+    /** End of validity, from the seller's plan when the listing goes live. Empty = no limit. */
+    expiresAt: Date,
+    /** Each renewal counts towards that month's listing allowance. */
+    renewals: { type: [{ type: Date }], default: [] },
+    /** Set when the seller takes the listing down as sold or unavailable. */
+    soldOut: {
+      at: Date,
+      reason: String,
+      note: String,
+      buyerUserId: { type: Schema.Types.ObjectId, ref: "User" },
+      pricePaise: Number,
+      by: { type: Schema.Types.ObjectId, ref: "User" },
+    },
     /** Seller toggle: unpublished listings stay in the panel but are hidden from buyers. */
     published: { type: Boolean, default: true },
     /** Set while the showroom is suspended or revoked. */
@@ -141,6 +154,7 @@ productSchema.index({ status: 1, createdAt: -1 });
 productSchema.index({ categorySlug: 1, status: 1, pricePaise: 1 });
 productSchema.index({ businessId: 1, status: 1 });
 productSchema.index({ featuredUntil: 1, status: 1 });
+productSchema.index({ status: 1, expiresAt: 1 });
 
 export const Category = model("Category", categorySchema);
 export const Brand = model("Brand", brandSchema);

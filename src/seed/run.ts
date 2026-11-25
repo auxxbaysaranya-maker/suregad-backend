@@ -15,7 +15,10 @@ export async function seedSystemData(): Promise<void> {
   for (const brand of brandSeeds) {
     await Brand.updateOne({ slug: brand.slug }, { $setOnInsert: brand }, { upsert: true });
   }
+  // Plans created before listing validity existed: individuals move to 2 listings a month once; after that admins own the numbers.
+  await SubscriptionPlan.updateOne({ code: "individual_free", "limits.listingValidityDays": { $exists: false } }, { $set: { "limits.monthlyListings": 2 } });
   for (const plan of planSeeds) {
+    await SubscriptionPlan.updateOne({ code: plan.code, "limits.listingValidityDays": { $exists: false } }, { $set: { "limits.listingValidityDays": plan.limits.listingValidityDays } });
     await SubscriptionPlan.updateOne({ code: plan.code }, { $setOnInsert: plan }, { upsert: true });
   }
   for (const plan of inspectionPlanSeeds) {
