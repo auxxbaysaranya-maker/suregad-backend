@@ -15,7 +15,7 @@ import { logger } from "../config/logger";
  */
 export const DEMO_APPLICANT_PASSWORD = "123456";
 
-function sampleDocument(title: string, lines: string[]): Buffer {
+export function sampleDocument(title: string, lines: string[]): Buffer {
   const rows = lines.map((line, index) => `<text x="60" y="${250 + index * 44}" font-size="26" fill="#2a2b4d">${line}</text>`).join("");
   return Buffer.from(
     `<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="700" viewBox="0 0 1000 700">
@@ -152,17 +152,16 @@ export async function ensureDemoApplicants(options: { reset?: boolean } = {}) {
 
 /**
  * With local-disk storage (no Cloudinary/S3), a fresh server has none of the demo files.
- * Regenerate the demo applicants' sample documents so reviewers can still open them.
+ * Regenerate documents marked "(sample)" so reviewers can still open them.
  */
 export async function restoreDemoDocuments(): Promise<void> {
   const { readLocalUpload, storageMode } = await import("../integrations/storage");
   if (storageMode() !== "local") return;
-  const users = await User.find({ email: { $in: ["seller@suregad.com", "partner@suregad.com"] } }).select("_id");
-  const ids = users.map((user) => user._id);
-  const [businesses, partners] = await Promise.all([Business.find({ ownerId: { $in: ids } }).select("documents"), PartnerProfile.find({ userId: { $in: ids } }).select("documents")]);
+  const sample = { documents: { $elemMatch: { name: / (sample)$/, key: /.svg$/ } } };
+  const [businesses, partners] = await Promise.all([Business.find(sample).select("documents"), PartnerProfile.find(sample).select("documents")]);
   let restored = 0;
   for (const doc of [...businesses.flatMap((row) => row.documents), ...partners.flatMap((row) => row.documents)]) {
-    if (!doc.key || !doc.key.endsWith(".svg")) continue;
+    if (!doc.key?.endsWith(".svg") || !/ (sample)$/.test(String(doc.name))) continue;
     try {
       await readLocalUpload(doc.key);
     } catch {
